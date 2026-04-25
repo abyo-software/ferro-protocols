@@ -2,7 +2,7 @@
 [package]
 name = "ferro-lumberjack"
 version = "0.1.0"
-description = "Logstash Lumberjack v2 (Beats) protocol primitives — frame codec and async client. Extracted from the Ferro ecosystem."
+description = "Logstash Lumberjack v2 (Beats) protocol primitives: frame codec, async client, async server, TLS via rustls. Extracted from the Ferro ecosystem."
 categories = ["network-programming", "encoding"]
 keywords = ["lumberjack", "beats", "logstash", "protocol", "elastic"]
 readme = "README.md"
