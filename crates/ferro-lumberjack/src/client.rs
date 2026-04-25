@@ -13,8 +13,6 @@
 //! Logstash references the expected last-in-window sequence under
 //! wrapping `u32` arithmetic (see [`crate::Sequence`]).
 
-#![cfg(feature = "client")]
-
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 

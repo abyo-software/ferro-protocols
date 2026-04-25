@@ -35,8 +35,6 @@
 //! # }
 //! ```
 
-#![cfg(feature = "server")]
-
 use std::io;
 use std::net::SocketAddr;
 

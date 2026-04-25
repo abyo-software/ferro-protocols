@@ -15,8 +15,6 @@
 //! happy path) is small enough that we will keep it indefinitely as
 //! defence-in-depth.
 
-#![cfg(feature = "parser-ruff")]
-
 use std::panic::AssertUnwindSafe;
 
 use ruff_python_parser as ruff_parser;

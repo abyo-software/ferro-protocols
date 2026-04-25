@@ -11,8 +11,6 @@
 //! The backend is `ruff` (see the `parser-ruff` feature, on by
 //! default).
 
-#![cfg(feature = "parser-ruff")]
-
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};

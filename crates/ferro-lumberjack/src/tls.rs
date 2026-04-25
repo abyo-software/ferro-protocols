@@ -23,8 +23,6 @@
 //!
 //! [wpr]: https://crates.io/crates/webpki-roots
 
-#![cfg(feature = "tls")]
-
 use std::path::Path;
 use std::sync::Arc;
 
