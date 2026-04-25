@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: Apache-2.0
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# fuzz artefacts
+crates/*/fuzz/target
+crates/*/fuzz/corpus
+crates/*/fuzz/artifacts
+crates/*/fuzz/coverage
+
+# coverage
+*.profraw
+*.profdata
+cobertura.xml
+lcov.info
+tarpaulin-report.html
+
+# editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# release tooling
+dist/
+
+# Internal development status reports — not for public consumption.
+# Keep them locally, but don't ship them with the public repo.
+PHASE_*_REPORT.md
+HARDENING_REPORT.md

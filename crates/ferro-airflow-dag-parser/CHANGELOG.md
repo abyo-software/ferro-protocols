@@ -1,0 +1,54 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+# Changelog — ferro-airflow-dag-parser
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+This crate is currently in the `v0.0.x` alpha series; breaking changes
+are allowed between any two releases until `v0.1.0`.
+
+## [Unreleased]
+
+### Removed (pre-publish hardening)
+- `parser-rustpython` feature and `rustpython_impl` module dropped
+  before initial release. The transitive dependency closure of
+  `rustpython-parser 0.4` pulls LGPL-3.0-only crates
+  (`malachite-*`) and unmaintained Unicode crates
+  (`unic-ucd-version` family), neither of which are compatible
+  with the workspace's Apache-2.0-clean license profile.
+  `parser-ruff` is the only backend.
+- `parser_shootout` example and cross-backend `parity.rs`
+  integration tests removed for the same reason.
+
+## [0.0.1] — initial alpha
+
+Initial extraction from FerroAir into a standalone crate.
+
+### Added
+- Static AST-based DAG extraction with two backends:
+  - `parser-ruff` (default) — `littrs-ruff-python-parser` 0.6.2
+    (Astral-mirrored ruff parser).
+  - `parser-rustpython` — `rustpython-parser` 0.4.
+- `ExtractedDag` aggregate (`dag_id`, `task_ids`, `schedule`,
+  `default_args` flag, `deps_edges`, `source_span`).
+- Validated `DagId` / `TaskId` newtypes — Airflow rule:
+  non-empty, ≤ 250 characters, `[a-zA-Z0-9_\-\.]`.
+- `ParseError` with `Parse`, `InvalidIdentifier`, `Internal`, `Io`, and
+  `NoBackend` variants.
+- `dynamic_markers` module — seven detectors for patterns that need
+  runtime evaluation (`PathStemDagId`, `ChainSplat`, `FStringTaskId`,
+  `DynamicScheduleExpr`, `UnsupportedTaskFlow`, `ImportTimeBranching`,
+  `ForLoopTaskGeneration`).
+- `ParseCache` — process-local mtime+size fingerprint + content-hash
+  cache keyed on canonicalised path. `dashmap`-backed.
+- Cross-backend parity tests when both features are enabled.
+- `parser_shootout` example for empirical backend comparison.
+- Fuzz target (`extract_static_dag`) covering arbitrary Python
+  bytes input — checked nightly in CI.
+
+### Notes
+- All test inputs are inline source strings; no vendored Apache
+  Airflow™ DAG files are shipped with the crate.
+- Identifier validation uses `chars().count()` (not byte length) to
+  match the upstream Python implementation.
+
+[Unreleased]: https://github.com/youichi-uda/ferro-protocols/compare/ferro-airflow-dag-parser-v0.0.1...HEAD
+[0.0.1]: https://github.com/youichi-uda/ferro-protocols/releases/tag/ferro-airflow-dag-parser-v0.0.1

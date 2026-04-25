@@ -1,0 +1,18 @@
+ferro-protocols
+Copyright 2026 Youichi Uda and contributors
+
+This product includes software developed as part of the Ferro ecosystem
+(https://github.com/youichi-uda).
+
+Individual crates in this workspace are extracted from production use in
+the Ferro ecosystem of Rust-native rewrites of JVM/Python data
+infrastructure components. Each crate retains its own README that
+identifies the originating product and the third-party specifications
+it implements.
+
+Trademarks: this project implements protocols and wire formats that may
+be associated with third-party trademarks (Apache Airflow™, Apache
+Kafka™, Elastic®, Logstash®, Keycloak®, OpenSearch®, OpenContainers
+Initiative™, etc.). The use of these names is purely descriptive of
+protocol compatibility and does not imply endorsement by, or affiliation
+with, the respective trademark holders.

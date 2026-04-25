@@ -1,0 +1,87 @@
+# SPDX-License-Identifier: Apache-2.0
+name: Release
+
+on:
+  push:
+    tags:
+      # Per-crate tags of the form  ferro-<name>-vX.Y.Z[-pre]
+      - "ferro-*-v[0-9]+.[0-9]+.[0-9]+*"
+
+jobs:
+  publish:
+    name: cargo publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # for creating the GitHub Release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.91.1
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Parse tag → crate, version
+        id: tag
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF#refs/tags/}"
+          # Tag pattern:  ferro-<crate>-v<version>
+          # Extract crate (everything between leading 'ferro-' and last '-v')
+          # and version (everything after last '-v').
+          CRATE="${TAG%-v*}"
+          VERSION="${TAG##*-v}"
+          if [ -z "$CRATE" ] || [ -z "$VERSION" ] || [ "$CRATE" = "$TAG" ]; then
+            echo "::error::Could not parse tag '$TAG' as ferro-<crate>-v<version>"
+            exit 1
+          fi
+          if [ ! -d "crates/$CRATE" ]; then
+            echo "::error::Tag references unknown crate '$CRATE' (no crates/$CRATE directory)"
+            exit 1
+          fi
+          echo "crate=$CRATE"     >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG"         >> "$GITHUB_OUTPUT"
+          echo "Releasing crate=$CRATE version=$VERSION (tag $TAG)"
+
+      - name: Verify Cargo.toml version matches tag
+        run: |
+          set -euo pipefail
+          CRATE="${{ steps.tag.outputs.crate }}"
+          VERSION="${{ steps.tag.outputs.version }}"
+          MANIFEST_VERSION=$(awk -F'"' '/^version = "/ {print $2; exit}' "crates/$CRATE/Cargo.toml")
+          if [ "$MANIFEST_VERSION" != "$VERSION" ]; then
+            echo "::error::Cargo.toml version ($MANIFEST_VERSION) does not match tag version ($VERSION)"
+            exit 1
+          fi
+
+      - name: Pre-publish gate (clippy / fmt / test / deny)
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --all-features
+          cargo install cargo-deny --locked
+          cargo deny --all-features check
+
+      - name: cargo publish (dry-run)
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          cd "crates/${{ steps.tag.outputs.crate }}"
+          cargo publish --dry-run
+
+      - name: cargo publish
+        if: ${{ !contains(steps.tag.outputs.version, '-') }}   # skip pre-release tags by default
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          cd "crates/${{ steps.tag.outputs.crate }}"
+          cargo publish
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: "${{ steps.tag.outputs.crate }} v${{ steps.tag.outputs.version }}"
+          body: |
+            See [`crates/${{ steps.tag.outputs.crate }}/CHANGELOG.md`](crates/${{ steps.tag.outputs.crate }}/CHANGELOG.md) for the entries in this release.
+          generate_release_notes: false

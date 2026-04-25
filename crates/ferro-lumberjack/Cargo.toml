@@ -1,0 +1,56 @@
+# SPDX-License-Identifier: Apache-2.0
+[package]
+name = "ferro-lumberjack"
+version = "0.1.0"
+description = "Logstash Lumberjack v2 (Beats) protocol primitives — frame codec and async client. Extracted from the Ferro ecosystem."
+categories = ["network-programming", "encoding"]
+keywords = ["lumberjack", "beats", "logstash", "protocol", "elastic"]
+readme = "README.md"
+
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+default = ["client", "server", "tls"]
+# Asynchronous client (sender side: Beats agent → Logstash).
+client = ["dep:tokio", "dep:async-trait"]
+# Asynchronous server (receiver side: Logstash-compatible endpoint).
+server = ["dep:tokio", "dep:async-trait"]
+# rustls-based TLS for client and/or server. Pulls in tokio-rustls; no openssl.
+tls = ["dep:tokio-rustls", "dep:rustls", "dep:rustls-pki-types", "dep:webpki-roots"]
+
+[dependencies]
+flate2.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+# Optional — gated by features above.
+tokio = { workspace = true, optional = true, features = ["net", "io-util", "time", "macros", "rt"] }
+async-trait = { workspace = true, optional = true }
+tokio-rustls = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true, features = ["std", "ring"] }
+rustls-pki-types = { workspace = true, optional = true, features = ["alloc"] }
+webpki-roots = { version = "0.26", optional = true }
+
+[dev-dependencies]
+proptest.workspace = true
+tokio = { workspace = true, features = ["full"] }
+tokio-test.workspace = true
+criterion.workspace = true
+rcgen = "0.13"
+tempfile = "3"
+
+[lints]
+workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[[bench]]
+name = "encode_decode"
+harness = false

@@ -1,0 +1,51 @@
+# SPDX-License-Identifier: Apache-2.0
+name: DCO
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  dco:
+    name: DCO sign-off check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Verify Signed-off-by on every commit in the PR
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # List commits that the PR introduces.
+          commits=$(git rev-list --no-merges "${BASE_SHA}..${HEAD_SHA}")
+          if [ -z "$commits" ]; then
+            echo "No commits in PR range; nothing to verify."
+            exit 0
+          fi
+          missing=()
+          for sha in $commits; do
+            author_name=$(git log -1 --pretty='%an' "$sha")
+            author_email=$(git log -1 --pretty='%ae' "$sha")
+            expected="Signed-off-by: ${author_name} <${author_email}>"
+            # Check the commit message for any Signed-off-by trailer that
+            # matches the author identity (case-insensitive on the email).
+            if ! git log -1 --pretty='%B' "$sha" | \
+                 grep -i -F -q "Signed-off-by: ${author_name} <${author_email}>"; then
+              missing+=("$sha  (expected: $expected)")
+            fi
+          done
+          if [ "${#missing[@]}" -ne 0 ]; then
+            echo "::error::The following commits are missing a matching Signed-off-by trailer:"
+            for m in "${missing[@]}"; do
+              echo "  $m"
+            done
+            echo ""
+            echo "Add the trailer with:  git commit --amend -s   (or rebase -i and re-sign)."
+            echo "See CONTRIBUTING.md for the DCO policy."
+            exit 1
+          fi
+          echo "All ${#commits} commits carry a valid Signed-off-by trailer."

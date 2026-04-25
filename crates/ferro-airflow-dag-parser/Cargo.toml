@@ -1,0 +1,54 @@
+# SPDX-License-Identifier: Apache-2.0
+[package]
+name = "ferro-airflow-dag-parser"
+version = "0.0.1"
+description = "Static AST-based extractor for Apache Airflow™ Python DAG files. Recovers dag_id, task_ids, dependencies, schedule, and dynamic-fallback markers without running the source. Extracted from the Ferro ecosystem."
+categories = ["development-tools", "parser-implementations"]
+keywords = ["airflow", "dag", "parser", "static-analysis", "python"]
+readme = "README.md"
+
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+# Production-default and only backend: ruff (selected for being 2.6×
+# faster than alternatives at full parity in the originating Ferro
+# PoC). The feature exists so downstream consumers can opt out of
+# pulling the parser by setting `default-features = false` if they
+# only need the codec-free types in `common` and `line_index`.
+default = ["parser-ruff"]
+# `ruff_python_parser` is not published to crates.io as a stable
+# library yet; we use the Astral-mirrored `littrs-*` crates as the
+# upstream-vendored versions, pinned for reproducibility.
+parser-ruff = [
+    "dep:littrs-ruff-python-parser",
+    "dep:littrs-ruff-python-ast",
+    "dep:littrs-ruff-text-size",
+]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror.workspace = true
+tracing.workspace = true
+dashmap = "6"
+chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
+
+# Backend dep — optional, gated on the `parser-ruff` feature.
+littrs-ruff-python-parser = { version = "0.6.2", optional = true }
+littrs-ruff-python-ast = { version = "0.6.2", optional = true }
+littrs-ruff-text-size = { version = "0.6.2", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

@@ -1,0 +1,43 @@
+# SPDX-License-Identifier: Apache-2.0
+[workspace]
+# fuzz dirs are excluded from the parent workspace via
+# `workspace.exclude` in the root Cargo.toml; this empty table marks
+# the fuzz package as its own standalone workspace so cargo-fuzz can
+# build it without conflict.
+
+# Override cargo-fuzz's default `panic = "abort"`. The
+# `ferro_airflow_dag_parser::panic_safe` shim depends on
+# `std::panic::catch_unwind` working, which requires `panic = "unwind"`
+# at link time. Without this override, upstream parser panics would
+# abort the fuzz binary instead of being converted to a
+# `ParseError::Internal` and counted as a regular fuzz outcome.
+[profile.release]
+panic = "unwind"
+
+[package]
+name = "ferro-airflow-dag-parser-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "Apache-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+ferro-airflow-dag-parser = { path = "..", default-features = false, features = ["parser-ruff"] }
+
+[[bin]]
+name = "extract_static_dag"
+path = "fuzz_targets/extract_static_dag.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dynamic_markers"
+path = "fuzz_targets/dynamic_markers.rs"
+test = false
+doc = false
+bench = false
