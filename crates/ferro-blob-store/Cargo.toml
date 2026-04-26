@@ -1,0 +1,42 @@
+# SPDX-License-Identifier: Apache-2.0
+[package]
+name = "ferro-blob-store"
+version = "0.0.1"
+description = "Async content-addressed blob-store trait + in-memory and filesystem backends. Foundation crate for ferro-oci-server, ferro-maven-layout, ferro-cargo-registry-server."
+categories = ["asynchronous", "filesystem", "data-structures"]
+keywords = ["blob", "storage", "content-addressed", "sha256", "registry"]
+readme = "README.md"
+
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+default = ["fs"]
+# Filesystem-backed `BlobStore` impl. Disable for `no_std`-ish or
+# embedded use cases (in-memory + a custom impl works without it).
+fs = ["dep:tokio"]
+
+[dependencies]
+async-trait = "0.1"
+bytes = "1"
+sha2 = "0.10"
+hex = "0.4"
+thiserror.workspace = true
+
+# `fs` feature only.
+tokio = { workspace = true, optional = true, features = ["fs", "io-util"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
+tempfile = "3"
+
+[lints]
+workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
