@@ -82,10 +82,30 @@ pub enum DigestParseError {
 }
 
 /// Content-addressed identifier in `<algo>:<hex>` form.
+///
+/// With the `serde` feature enabled, [`Digest`] serializes and
+/// deserializes via its wire `<algo>:<hex>` string form.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(try_from = "String", into = "String"))]
 pub struct Digest {
     algo: DigestAlgo,
     hex: String,
+}
+
+#[cfg(feature = "serde")]
+impl TryFrom<String> for Digest {
+    type Error = DigestParseError;
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        s.parse()
+    }
+}
+
+#[cfg(feature = "serde")]
+impl From<Digest> for String {
+    fn from(d: Digest) -> Self {
+        d.to_string()
+    }
 }
 
 impl Digest {

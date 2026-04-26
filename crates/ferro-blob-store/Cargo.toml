@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 [package]
 name = "ferro-blob-store"
-version = "0.0.1"
+version = "0.0.2"
 description = "Async content-addressed blob-store trait + in-memory and filesystem backends. Foundation crate for ferro-oci-server, ferro-maven-layout, ferro-cargo-registry-server."
 categories = ["asynchronous", "filesystem", "data-structures"]
 keywords = ["blob", "storage", "content-addressed", "sha256", "registry"]
@@ -19,6 +19,10 @@ default = ["fs"]
 # Filesystem-backed `BlobStore` impl. Disable for `no_std`-ish or
 # embedded use cases (in-memory + a custom impl works without it).
 fs = ["dep:tokio"]
+# `serde::{Serialize,Deserialize}` for `Digest` (renders as the
+# `<algo>:<hex>` wire string). Useful for protocol crates that put
+# digests into JSON manifests (OCI, etc.).
+serde = ["dep:serde"]
 
 [dependencies]
 async-trait = "0.1"
@@ -26,6 +30,7 @@ bytes = "1"
 sha2 = "0.10"
 hex = "0.4"
 thiserror.workspace = true
+serde = { version = "1", features = ["derive"], optional = true }
 
 # `fs` feature only.
 tokio = { workspace = true, optional = true, features = ["fs", "io-util"] }

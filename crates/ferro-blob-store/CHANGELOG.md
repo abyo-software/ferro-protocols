@@ -8,6 +8,19 @@ allowed between any two releases until `v0.1.0`.
 
 ## [Unreleased]
 
+## [0.0.2] — 2026-04-26
+
+### Added
+- `serde` feature: `Digest` gains `Serialize` / `Deserialize` via its
+  `<algo>:<hex>` wire string. Needed by protocol crates that put
+  digests into JSON manifests (OCI etc.).
+- `SharedBlobStore` type alias (`Arc<dyn BlobStore>`) for ergonomic
+  cross-task handle passing.
+
+### Changed
+- No breaking changes. `serde` is opt-in; `SharedBlobStore` is
+  additive.
+
 ## [0.0.1] — initial alpha
 
 Initial extraction from the FerroRepo storage layer.

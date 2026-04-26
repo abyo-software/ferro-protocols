@@ -1,10 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 //! The [`BlobStore`] trait.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use bytes::Bytes;
 
 use crate::{Digest, Result};
+
+/// Convenience type alias: `Arc<dyn BlobStore>`. Use this when you
+/// want to pass a [`BlobStore`] handle by value across async tasks
+/// without re-introducing the dynamic-dispatch boilerplate at every
+/// call site.
+pub type SharedBlobStore = Arc<dyn BlobStore>;
 
 /// A content-addressed blob store.
 ///

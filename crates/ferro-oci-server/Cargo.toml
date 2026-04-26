@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: Apache-2.0
+[package]
+name = "ferro-oci-server"
+version = "0.0.1"
+description = "OCI Distribution Specification v1.1 server-side primitives — manifest / blob / tag / referrers handlers, chunked uploads, in-memory metadata plane. Backed by ferro-blob-store. Extracted from the Ferro ecosystem."
+categories = ["web-programming::http-server", "development-tools"]
+keywords = ["oci", "distribution", "registry", "docker", "axum"]
+readme = "README.md"
+
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+ferro-blob-store = { version = "0.0", path = "../ferro-blob-store" }
+axum = "0.8"
+tokio = { workspace = true, features = ["sync"] }
+bytes = "1"
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror.workspace = true
+sha2 = "0.10"
+hex = "0.4"
+uuid = { version = "1", features = ["v4"] }
+http = "1"
+futures = "0.3"
+tracing.workspace = true
+parking_lot = "0.12"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
+tower = { version = "0.5", features = ["util"] }
+tempfile = "3"
+http-body-util = "0.1"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+pedantic = { level = "allow", priority = -1 }
+nursery = { level = "allow", priority = -1 }
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

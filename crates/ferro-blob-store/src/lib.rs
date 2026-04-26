@@ -12,7 +12,7 @@ mod memory;
 #[cfg_attr(docsrs, doc(cfg(feature = "fs")))]
 mod fs;
 
-pub use blob_store::BlobStore;
+pub use blob_store::{BlobStore, SharedBlobStore};
 pub use digest::{Digest, DigestAlgo, DigestParseError};
 pub use error::BlobStoreError;
 pub use memory::InMemoryBlobStore;
