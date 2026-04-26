@@ -1,0 +1,63 @@
+# SPDX-License-Identifier: Apache-2.0
+[package]
+name = "ferro-maven-layout"
+version = "0.0.1"
+description = "Apache Maven repository layout 2.0 — GAV parsing, maven-metadata.xml, POM minimal parser, SNAPSHOT versioning, SHA-1/SHA-256/MD5 checksums, plus an Axum HTTP router. Extracted from the Ferro ecosystem."
+categories = ["development-tools::build-utils", "parser-implementations", "web-programming::http-server"]
+keywords = ["maven", "repository", "gav", "axum", "registry"]
+readme = "README.md"
+
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+default = ["http"]
+# `http` enables the Axum HTTP router (handlers/router modules).
+# Disable for pure-data parsing only (layout / metadata / pom / snapshot).
+http = ["dep:axum", "dep:tokio", "dep:http", "dep:async-trait"]
+# Accept legacy MD5 checksums (Maven 2 clients only).
+legacy-md5 = []
+
+[dependencies]
+ferro-blob-store = { version = "0.0", path = "../ferro-blob-store" }
+bytes = "1"
+serde = { version = "1", features = ["derive"] }
+thiserror.workspace = true
+sha1 = "0.10"
+sha2 = "0.10"
+hex = "0.4"
+quick-xml = { version = "0.39", features = ["serialize"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+tracing.workspace = true
+regex = "1"
+
+# `http` feature only.
+axum = { version = "0.8", optional = true }
+tokio = { workspace = true, optional = true, features = ["sync"] }
+http = { version = "1", optional = true }
+async-trait = { version = "0.1", optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
+tower = { version = "0.5", features = ["util"] }
+tempfile = "3"
+http-body-util = "0.1"
+
+# Inherit workspace lints but loosen pedantic/nursery for ported code.
+# `unsafe_code = "forbid"` and `missing_docs = "warn"` (the meaningful
+# guards) still apply.
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+pedantic = { level = "allow", priority = -1 }
+nursery = { level = "allow", priority = -1 }
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
