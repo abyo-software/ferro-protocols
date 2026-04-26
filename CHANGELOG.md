@@ -15,14 +15,26 @@ breaking API changes between releases; that contract becomes strict at
 
 ### Added
 - Workspace bootstrapped: licensing, CI scaffolding, contribution
-  policy (DCO), security policy, and the first crate
-  (`ferro-lumberjack`) extracted from the Ferro ecosystem.
+  policy (DCO), security policy, and the first crates extracted
+  from the Ferro ecosystem.
+- `ferro-blob-store v0.0.3` — content-addressed `BlobStore` trait +
+  in-memory + filesystem backends; foundation for the OCI / Maven /
+  Cargo crates below.
 - `ferro-lumberjack v0.1.0` — beta-grade client + server primitives
   with TLS in both directions. See
   [`crates/ferro-lumberjack/CHANGELOG.md`](crates/ferro-lumberjack/CHANGELOG.md).
 - `ferro-airflow-dag-parser v0.0.1` — alpha static AST DAG
-  extractor for Apache Airflow™ Python files. Two parser backends
-  (ruff default, rustpython parity). See
+  extractor for Apache Airflow™ Python files. Ruff backend + seven
+  dynamic-fallback markers. See
   [`crates/ferro-airflow-dag-parser/CHANGELOG.md`](crates/ferro-airflow-dag-parser/CHANGELOG.md).
+- `ferro-maven-layout v0.0.1` — Maven Repository Layout 2.0
+  primitives + Axum HTTP router. See
+  [`crates/ferro-maven-layout/CHANGELOG.md`](crates/ferro-maven-layout/CHANGELOG.md).
+- `ferro-cargo-registry-server v0.0.1` — Cargo Alternative
+  Registry sparse-index server primitives. See
+  [`crates/ferro-cargo-registry-server/CHANGELOG.md`](crates/ferro-cargo-registry-server/CHANGELOG.md).
+- `ferro-oci-server v0.0.1` — OCI Distribution v1.1 server-side
+  primitives. See
+  [`crates/ferro-oci-server/CHANGELOG.md`](crates/ferro-oci-server/CHANGELOG.md).
 
 [Unreleased]: https://github.com/youichi-uda/ferro-protocols/commits/main

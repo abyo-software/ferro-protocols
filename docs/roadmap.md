@@ -10,13 +10,14 @@ in the parent project; this is the public-facing summary.
 These five crates are the foundation. Each is extracted from a Ferro
 ecosystem product where it has working test coverage today.
 
-| Crate | Source product | Initial version | Stability |
+| Crate | Source product | Current version | Stability |
 |---|---|---|---|
-| [`ferro-lumberjack`](../crates/ferro-lumberjack/) | FerroBeat / FerroHeartbeat | `v0.0.1` | alpha — client only; server side on roadmap |
-| [`ferro-airflow-dag-parser`](../crates/ferro-airflow-dag-parser/) | `ferro-air` | `v0.0.1` | alpha — extracted, two backends, 75 tests |
-| `ferro-cargo-registry-server` | FerroRepo | `v0.0.1` | not yet extracted |
-| `ferro-maven-layout` | FerroRepo | `v0.0.1` | not yet extracted |
-| `ferro-oci-server` | FerroRepo | `v0.1.0` | not yet extracted; will publish only after upstream conformance suite passes |
+| [`ferro-blob-store`](../crates/ferro-blob-store/) | FerroRepo storage | `v0.0.3` | alpha — published 2026-04-26, foundation crate |
+| [`ferro-lumberjack`](../crates/ferro-lumberjack/) | FerroBeat / FerroHeartbeat | `v0.1.0` | beta — published 2026-04-26, client + server, TLS both directions |
+| [`ferro-airflow-dag-parser`](../crates/ferro-airflow-dag-parser/) | `ferro-air` | `v0.0.1` | alpha — published 2026-04-26, ruff backend, 75 tests |
+| [`ferro-maven-layout`](../crates/ferro-maven-layout/) | FerroRepo Maven | `v0.0.1` | alpha — published 2026-04-26, 49 tests |
+| [`ferro-cargo-registry-server`](../crates/ferro-cargo-registry-server/) | FerroRepo Cargo | `v0.0.1` | alpha — published 2026-04-26, sparse index, 38 tests |
+| [`ferro-oci-server`](../crates/ferro-oci-server/) | FerroRepo OCI | `v0.0.1` | alpha — published 2026-04-26, 67 tests; conformance harness pending for `v0.1.0` |
 
 ## Tier 2 — secondary wave
 

@@ -43,12 +43,17 @@ the rest of the Rust ecosystem (Apache-2.0).
 
 | Crate | Version | Extracted from | Status |
 |---|---|---|---|
-| [`ferro-lumberjack`](crates/ferro-lumberjack/README.md) | `v0.1.0` | `ferro-beat` / `ferro-heartbeat` | beta — client + server, TLS both directions |
-| [`ferro-airflow-dag-parser`](crates/ferro-airflow-dag-parser/README.md) | `v0.0.1` | `ferro-air` | alpha — static AST DAG extraction with two backends |
+| [`ferro-blob-store`](crates/ferro-blob-store/README.md) | `v0.0.3` | FerroRepo storage | alpha — content-addressed `BlobStore` trait + in-memory + filesystem backends; foundation for OCI / Maven / Cargo crates below |
+| [`ferro-lumberjack`](crates/ferro-lumberjack/README.md) | `v0.1.0` | `ferro-beat` / `ferro-heartbeat` | beta — Logstash Lumberjack v2 codec + client + server + TLS |
+| [`ferro-airflow-dag-parser`](crates/ferro-airflow-dag-parser/README.md) | `v0.0.1` | `ferro-air` | alpha — static AST DAG extraction (ruff backend, 7 dynamic-fallback markers) |
+| [`ferro-maven-layout`](crates/ferro-maven-layout/README.md) | `v0.0.1` | FerroRepo Maven | alpha — Maven Repository Layout 2.0 + Axum router |
+| [`ferro-cargo-registry-server`](crates/ferro-cargo-registry-server/README.md) | `v0.0.1` | FerroRepo Cargo | alpha — Cargo Alternative Registry sparse-index server |
+| [`ferro-oci-server`](crates/ferro-oci-server/README.md) | `v0.0.1` | FerroRepo OCI | alpha — OCI Distribution v1.1 server primitives |
 
-Additional Tier-1 crates planned for early publication: `ferro-airflow-dag-parser`,
-`ferro-cargo-registry-server`, `ferro-maven-layout`, `ferro-oci-server`. See
-[`docs/roadmap.md`](docs/roadmap.md) for the full schedule and Tier-2 crates.
+See [`docs/roadmap.md`](docs/roadmap.md) for Tier-2 follow-ups
+(`ferro-pep503-pep691`, `ferro-go-module-proxy`, `ferro-helm-chart-repo`,
+`ferro-painless`, `ferro-esql-parser`, `ferro-eql-parser`,
+`ferro-aql-parser`, `ferro-logstash-dsl-parser`, `ferro-keycloak-realm-import`).
 
 ## Workspace layout
 
