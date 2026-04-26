@@ -8,10 +8,11 @@ use bytes::Bytes;
 
 use crate::{Digest, Result};
 
-/// Convenience type alias: `Arc<dyn BlobStore>`. Use this when you
-/// want to pass a [`BlobStore`] handle by value across async tasks
-/// without re-introducing the dynamic-dispatch boilerplate at every
-/// call site.
+/// Convenience type alias: `Arc<dyn BlobStore>`.
+///
+/// Use this when you want to pass a [`BlobStore`] handle by value
+/// across async tasks without re-introducing the dynamic-dispatch
+/// boilerplate at every call site.
 pub type SharedBlobStore = Arc<dyn BlobStore>;
 
 /// A content-addressed blob store.

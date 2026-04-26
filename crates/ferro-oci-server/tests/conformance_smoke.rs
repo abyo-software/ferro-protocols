@@ -25,7 +25,7 @@ use tower::ServiceExt;
 
 fn make_app() -> (Router, TempDir) {
     let tmp = TempDir::new().expect("tempdir");
-    let blob_store: SharedBlobStore = Arc::new(FsBlobStore::new(tmp.path()));
+    let blob_store: SharedBlobStore = Arc::new(FsBlobStore::new(tmp.path()).expect("blob store"));
     let registry = Arc::new(InMemoryRegistryMeta::new());
     let state = Arc::new(AppState {
         blob_store,

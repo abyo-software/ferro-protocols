@@ -212,12 +212,9 @@ impl RegistryMeta for InMemoryRegistryMeta {
         let Some((media_type, body)) = name_map.get(&digest_str) else {
             return Ok(None);
         };
-        let digest: Digest =
-            digest_str
-                .parse()
-                .map_err(|e: ferro_blob_store::DigestParseError| {
-                    ferro_blob_store::FerroRepoError::Digest(e.to_string())
-                })?;
+        let digest: Digest = digest_str
+            .parse()
+            .map_err(ferro_blob_store::BlobStoreError::InvalidDigest)?;
         Ok(Some((digest, media_type.clone(), body.clone())))
     }
 
@@ -293,14 +290,14 @@ impl RegistryMeta for InMemoryRegistryMeta {
         let mut guard = self.inner.write();
         let key = (name.to_owned(), uuid.to_owned());
         let Some(state) = guard.uploads.get_mut(&key) else {
-            return Err(ferro_blob_store::FerroRepoError::InvalidRequest(format!(
+            return Err(ferro_blob_store::BlobStoreError::NotFound(format!(
                 "unknown upload uuid: {uuid}"
             )));
         };
         // Spec §4.3: chunked uploads must be sequential — the next
         // chunk's `Content-Range` start must equal the current offset.
         if offset != state.offset() {
-            return Err(ferro_blob_store::FerroRepoError::InvalidRequest(format!(
+            return Err(ferro_blob_store::BlobStoreError::NotFound(format!(
                 "out-of-order upload chunk: expected offset {}, got {offset}",
                 state.offset()
             )));
@@ -417,10 +414,7 @@ mod tests {
             .append_upload("lib/alpine", &uuid, 10, Bytes::from_static(b"cd"))
             .await
             .expect_err("out-of-order chunk must fail");
-        assert!(matches!(
-            err,
-            ferro_blob_store::FerroRepoError::InvalidRequest(_)
-        ));
+        assert!(matches!(err, ferro_blob_store::BlobStoreError::NotFound(_)));
     }
 
     #[tokio::test]

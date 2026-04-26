@@ -8,6 +8,13 @@ allowed between any two releases until `v0.1.0`.
 
 ## [Unreleased]
 
+## [0.0.3] — 2026-04-26
+
+### Changed
+- Doc-only: split `SharedBlobStore` description into a leading
+  one-sentence summary + a separate detail paragraph, satisfying
+  the workspace `clippy::too_long_first_doc_paragraph` lint.
+
 ## [0.0.2] — 2026-04-26
 
 ### Added

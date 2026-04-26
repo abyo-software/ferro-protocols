@@ -78,7 +78,7 @@ pub async fn get_blob(state: &AppState, name: &str, digest_str: &str) -> Respons
     }
     let bytes = match state.blob_store.get(&digest).await {
         Ok(b) => b,
-        Err(ferro_blob_store::FerroRepoError::BlobNotFound(_)) => {
+        Err(ferro_blob_store::BlobStoreError::NotFound(_)) => {
             return OciError::new(
                 OciErrorCode::BlobUnknown,
                 format!("blob {digest} not found"),
@@ -109,7 +109,7 @@ pub async fn head_blob(state: &AppState, name: &str, digest_str: &str) -> Respon
     }
     let bytes = match state.blob_store.get(&digest).await {
         Ok(b) => b,
-        Err(ferro_blob_store::FerroRepoError::BlobNotFound(_)) => {
+        Err(ferro_blob_store::BlobStoreError::NotFound(_)) => {
             return OciError::new(
                 OciErrorCode::BlobUnknown,
                 format!("blob {digest} not found"),

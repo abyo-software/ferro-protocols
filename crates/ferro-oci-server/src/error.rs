@@ -205,21 +205,22 @@ impl IntoResponse for OciError {
 /// Convenience alias for handler results.
 pub type OciResult<T> = Result<T, OciError>;
 
-/// Map a [`ferro_blob_store::FerroRepoError`] onto an [`OciError`].
+/// Map a [`ferro_blob_store::BlobStoreError`] onto an [`OciError`].
 ///
-/// Called at the edge of every handler so protocol-crate code can use
+/// Called at the edge of every handler so the protocol crate can use
 /// the workspace-wide `Result` type while still surfacing spec-shaped
 /// responses.
-impl From<ferro_blob_store::FerroRepoError> for OciError {
-    fn from(err: ferro_blob_store::FerroRepoError) -> Self {
-        use ferro_blob_store::FerroRepoError as F;
+impl From<ferro_blob_store::BlobStoreError> for OciError {
+    fn from(err: ferro_blob_store::BlobStoreError) -> Self {
+        use ferro_blob_store::BlobStoreError as B;
+        let msg = err.to_string();
         match err {
-            F::BlobNotFound(_) => Self::new(OciErrorCode::BlobUnknown, err.to_string()),
-            F::Digest(msg) => Self::new(OciErrorCode::DigestInvalid, msg),
-            F::InvalidRequest(msg) => Self::new(OciErrorCode::ManifestInvalid, msg),
-            F::Auth(msg) => Self::new(OciErrorCode::Unauthorized, msg),
-            F::Unsupported(msg) => Self::new(OciErrorCode::Unsupported, msg),
-            other => Self::new(OciErrorCode::Unsupported, other.to_string()),
+            B::NotFound(_) => Self::new(OciErrorCode::BlobUnknown, msg),
+            B::DigestMismatch { .. } | B::InvalidDigest(_) => {
+                Self::new(OciErrorCode::DigestInvalid, msg)
+            }
+            B::Io(_) => Self::new(OciErrorCode::Unsupported, msg),
+            _ => Self::new(OciErrorCode::Unsupported, msg),
         }
     }
 }

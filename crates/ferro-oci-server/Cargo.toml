@@ -15,7 +15,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-ferro-blob-store = { version = "0.0", path = "../ferro-blob-store" }
+ferro-blob-store = { version = "0.0.2", path = "../ferro-blob-store", features = ["serde"] }
 axum = "0.8"
 tokio = { workspace = true, features = ["sync"] }
 bytes = "1"
