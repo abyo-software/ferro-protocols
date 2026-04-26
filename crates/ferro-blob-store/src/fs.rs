@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Filesystem-backed [`BlobStore`].
 
-#![cfg(feature = "fs")]
-
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
