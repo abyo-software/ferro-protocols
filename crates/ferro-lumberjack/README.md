@@ -2,20 +2,30 @@
 # ferro-lumberjack
 
 [![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](../../LICENSE)
-[![Rust 1.85+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](../../rust-toolchain.toml)
+[![crates.io](https://img.shields.io/crates/v/ferro-lumberjack.svg)](https://crates.io/crates/ferro-lumberjack)
+[![docs.rs](https://docs.rs/ferro-lumberjack/badge.svg)](https://docs.rs/ferro-lumberjack)
+[![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](../../rust-toolchain.toml)
 
 Rust primitives for the **Logstash Lumberjack v2** wire protocol — the
 framing protocol Filebeat, Heartbeat, and other Elastic Beats agents
 use to ship events to Logstash (and to other Beats-protocol-compatible
 ingestion endpoints).
 
+> The Lumberjack v2 protocol is the most widely-deployed log-shipping
+> wire format in production today, and the conversation around the
+> licensing of the official Beats agents has made portable, permissively-licensed
+> reimplementations more interesting than they used to be. Until now,
+> there has been no Rust crate implementing either side of the wire.
+> This crate is both — a frame codec, an async client, and an async
+> server, with TLS in both directions via rustls. Extracted from
+> production use in [`ferro-beat`] (Filebeat-compatible log shipper)
+> and [`ferro-heartbeat`] (Heartbeat-compatible monitor).
+
 > **Beta (`v0.1.0`).** Both client and server primitives are
 > available. The public API is stable for the `0.1.x` series — minor
 > releases may deprecate but not remove APIs. See [Status](#status).
 
-Part of the **Ferro ecosystem**. Extracted from production use in
-[`ferro-beat`] (Filebeat-compatible log shipper) and
-[`ferro-heartbeat`] (Heartbeat-compatible monitor).
+Part of the **Ferro ecosystem**.
 
 [`ferro-beat`]: https://github.com/youichi-uda/ferro-beat
 [`ferro-heartbeat`]: https://github.com/youichi-uda/ferro-heartbeat

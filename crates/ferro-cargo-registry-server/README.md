@@ -2,14 +2,23 @@
 # ferro-cargo-registry-server
 
 [![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](../../LICENSE)
+[![crates.io](https://img.shields.io/crates/v/ferro-cargo-registry-server.svg)](https://crates.io/crates/ferro-cargo-registry-server)
+[![docs.rs](https://docs.rs/ferro-cargo-registry-server/badge.svg)](https://docs.rs/ferro-cargo-registry-server)
 [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](../../rust-toolchain.toml)
 
-**Server-side** primitives for the
+**Embeddable** server-side primitives for the
 [Cargo Alternative Registry Protocol](https://doc.rust-lang.org/cargo/reference/registries.html#registry-protocols),
-sparse-index variant. As far as we can tell, this is the first
-crate on crates.io that publishes the *server* half of this protocol;
-existing crates implement the client (cargo itself) or git-index
-internals.
+sparse-index variant.
+
+> [Cargo's Alternative Registry RFC 2141](https://rust-lang.github.io/rfcs/2141-alternative-registries.html)
+> was accepted in 2018. The widely-used full-server implementation,
+> [`alexandrie`](https://github.com/Hirevo/alexandrie) (Apache-2.0),
+> is a complete standalone application — you run it, you don't embed
+> it. The cargo team's own [`crates.io`](https://github.com/rust-lang/crates.io)
+> codebase is tightly coupled to the public registry site and isn't
+> packaged as a library either. This crate is the embeddable middle
+> ground: a `BlobStore`-backed Axum router you mount under any URL
+> prefix, inside whatever service you already run.
 
 > ⚠️ **Alpha (`v0.0.1`).** API will shift before `v0.1`.
 
@@ -67,12 +76,35 @@ axum::serve(listener, app).await?;
 # Ok(()) }
 ```
 
-Client-side: point `cargo` at it via your `~/.cargo/config.toml`:
+Client-side: point `cargo` at it via `~/.cargo/config.toml`:
 
 ```toml
 [registries.my-registry]
 index = "sparse+https://my-registry.example.com/index/"
+
+# Optional — make this the default for `cargo publish`:
+# [registry]
+# default = "my-registry"
 ```
+
+Then:
+
+```bash
+$ cargo publish --registry=my-registry
+   Updating `my-registry` index
+   Packaging some-crate v0.1.0 (...)
+   Verifying some-crate v0.1.0 (...)
+   Uploading some-crate v0.1.0 (...)
+$ cargo install some-crate --registry=my-registry
+   Updating `my-registry` index
+  Downloaded some-crate v0.1.0 (registry `my-registry`)
+   ...
+```
+
+The publish flow lands at `/api/v1/crates/new`; the index fetch is
+served from `/index/{*path}`; the tarball download is at
+`/api/v1/crates/{name}/{version}/download` — all of those are wired
+into the `router()` returned by this crate.
 
 ## Status
 

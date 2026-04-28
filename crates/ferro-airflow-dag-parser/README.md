@@ -2,21 +2,61 @@
 # ferro-airflow-dag-parser
 
 [![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](../../LICENSE)
-[![Rust 1.85+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](../../rust-toolchain.toml)
+[![crates.io](https://img.shields.io/crates/v/ferro-airflow-dag-parser.svg)](https://crates.io/crates/ferro-airflow-dag-parser)
+[![docs.rs](https://docs.rs/ferro-airflow-dag-parser/badge.svg)](https://docs.rs/ferro-airflow-dag-parser)
+[![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](../../rust-toolchain.toml)
 
 Static, AST-based extractor for **Apache Airflow™** Python DAG files.
 Recovers `dag_id`, `task_ids`, task dependencies, schedule, and a
 catalogue of "this can't be resolved statically" markers — without
 running the source.
 
+> Apache Airflow's own performance docs tell users to "minimize
+> top-level code" because every poll cycle of the DAG processor
+> imports every `dags/*.py` file through CPython, and import-time
+> work blocks the scheduler. The advice is a workaround for a
+> structural problem: the reference scheduler has no way to read a
+> DAG file's *structure* without evaluating the *file*.
+> `ferro-airflow-dag-parser` answers the question that workaround
+> leaves hanging: *what if the structural read didn't need
+> CPython at all?*
+
 > ⚠️ **Alpha (`v0.0.1`).** API will change between `0.0.x` releases.
 > The implementation is pulled from production use in the Ferro
-> ecosystem; it is the static fast-path that orchestrators use to skip
-> `CPython` evaluation when a DAG file's structure can be determined by
-> looking at the Python AST alone.
+> ecosystem; it is the static fast-path that orchestrators use to
+> skip `CPython` evaluation when a DAG file's structure can be
+> determined by looking at the Python AST alone.
 
 Part of the **Ferro ecosystem**. Extracted from production use in
 [FerroAir](https://github.com/youichi-uda/ferro-air) (an Airflow-3-compatible orchestrator written in Rust).
+
+## What this saves you
+
+```python
+# Reference Airflow path: spawn / reuse CPython, import the file,
+# walk DagBag, pickle the DAG into the scheduler's metadata DB.
+# Cost: ~50–200 ms per file at startup, repeated every poll cycle,
+# multiplied by however many DAG files you have.
+```
+
+```text
+// ferro-airflow-dag-parser path: parse to AST, walk it once.
+// No Python interpreter, no DagBag, no pickle.
+let dag = ferro_airflow_dag_parser::extract_static_dag(src)?;
+//   ↑ microseconds per file, on the static fraction.
+```
+
+The parser also tells you *which* DAGs **can't** take the static
+path — the seven [dynamic-fallback markers](#what-this-crate-does)
+each map to a specific Python idiom that requires runtime
+evaluation. An orchestrator routes those (and only those) to a
+`CPython` embed; everything else stays in Rust.
+
+We have not yet published a head-to-head benchmark against the
+upstream `DagBag` import path, so the speedup figure above is a
+back-of-the-envelope claim from comparing component costs (Python
+import vs Rust AST walk on equivalent inputs). Production figures
+will land alongside the [`FerroAir`](https://github.com/youichi-uda/ferro-air) performance report.
 
 ## What this crate does
 

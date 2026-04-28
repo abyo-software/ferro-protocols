@@ -2,23 +2,32 @@
 # ferro-oci-server
 
 [![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](../../LICENSE)
+[![crates.io](https://img.shields.io/crates/v/ferro-oci-server.svg)](https://crates.io/crates/ferro-oci-server)
+[![docs.rs](https://docs.rs/ferro-oci-server/badge.svg)](https://docs.rs/ferro-oci-server)
 [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](../../rust-toolchain.toml)
 
-**Server-side** primitives for the
+**Embeddable** server-side primitives for the
 [OCI Distribution Specification v1.1](https://github.com/opencontainers/distribution-spec).
-Implements the Manifest / Blob / Tag / Referrers API surface as an
-Axum router, plus a chunked-upload state machine, error envelope
-that matches §6.2 of the spec, and a metadata-plane trait that
-keeps the storage layer abstract.
+Manifest / Blob / Tag / Referrers handlers as an Axum router, a
+chunked-upload state machine, the spec §6.2 error envelope, and a
+metadata-plane trait that keeps the storage layer abstract.
 
-> ⚠️ **Alpha (`v0.0.1`).** API will shift before `v0.1`. The
-> roadmap target for `v0.1.0` is "passes the upstream
-> `opencontainers/distribution-spec` conformance test suite".
+> The Rust ecosystem has had [`oci-client`](https://crates.io/crates/oci-client)
+> (formerly `oci-distribution`) and [`oci-spec`](https://crates.io/crates/oci-spec)
+> for years. What's been missing is the **server**. The dominant
+> open OCI registries —
+> [Harbor](https://github.com/goharbor/harbor),
+> [zot](https://github.com/project-zot/zot), and the
+> [`distribution/distribution`](https://github.com/distribution/distribution)
+> reference impl — are all Go. There has been no embeddable Rust
+> answer for the OCI Distribution Spec server side. This crate is
+> a starting point for one.
 
-Part of the **Ferro ecosystem**. Existing Rust crates implement the
-OCI client (`oci-client`) and types (`oci-spec`); as far as we can
-tell, this is the first crate on crates.io that publishes the
-*server* half.
+> ⚠️ **Alpha (`v0.0.1`).** API will shift before `v0.1`. See
+> [Roadmap to v0.1.0](#roadmap-to-v010) below for the explicit gate.
+
+Part of the **Ferro ecosystem**. Extracted from FerroRepo, a private
+Rust artifact repository.
 
 ## What this crate does
 
@@ -81,6 +90,27 @@ axum::serve(listener, app).await?;
 
 Then `docker push localhost:5000/myimage:latest` should work
 against the running server.
+
+## Roadmap to v0.1.0
+
+The `v0.0.x` → `v0.1.0` promotion gate is one explicit milestone:
+
+> The crate must pass the upstream
+> [`opencontainers/distribution-spec` conformance test suite](https://github.com/opencontainers/distribution-spec/tree/main/conformance)
+> end-to-end.
+
+Today's coverage is **smoke-test grade**: `tests/conformance_smoke.rs`
+exercises the full request walk for every endpoint pair (start
+upload → chunked PATCH → finalize PUT → blob HEAD/GET → manifest
+PUT-by-tag → manifest GET-by-digest → referrers GET → tag list →
+catalog → delete) and the error path for the variants in spec §6.2.
+That gives confidence that the wire shape is right, but it is not
+the same as passing the official conformance harness.
+
+Vendoring the upstream Go-based conformance suite into the test
+matrix is tracked in the workspace issue tracker. Persistent
+metadata backends (SQLite / Postgres) and an authentication trait
+are also gated against `v0.1.0`.
 
 ## Status
 

@@ -3,37 +3,88 @@
 
 [![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![DCO](https://img.shields.io/badge/DCO-required-green.svg)](CONTRIBUTING.md#developer-certificate-of-origin)
-[![Rust 1.80+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](rust-toolchain.toml)
+[![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](rust-toolchain.toml)
 
-Production-extracted Rust crates that implement the protocols, wire formats,
-and compatibility layers underlying the **Ferro ecosystem** of Rust-native
-rewrites of JVM and Python data infrastructure.
+<!-- Star history badge — add to this README only after the workspace
+     reaches ~50 stars. An empty graph is worse than no graph; the
+     social-proof loop only kicks in once there is something to show. -->
 
-Each crate in this workspace started its life as part of a Ferro product
-(FerroSearch, FerroStream, FerroBeat, FerroAir, FerroAuth, FerroRepo, …)
-and was extracted into a standalone, narrowly-scoped crate so that other
-projects can depend on the same battle-tested implementation.
+**The protocol layer Rust was missing.** Six small crates that
+implement the wire formats and server-side primitives behind the
+JVM and Python data infrastructure stack — extracted from
+production use in the Ferro ecosystem.
+
+```bash
+cargo add ferro-blob-store              # content-addressed BlobStore + InMem + Fs backends
+cargo add ferro-lumberjack              # Logstash Lumberjack v2 (Beats) — codec + client + server + TLS
+cargo add ferro-airflow-dag-parser      # Apache Airflow DAG static AST extractor (no CPython)
+cargo add ferro-maven-layout            # Maven Repository Layout 2.0 + Axum router
+cargo add ferro-cargo-registry-server   # Cargo Alternative Registry sparse-index server primitives
+cargo add ferro-oci-server              # OCI Distribution v1.1 server primitives
+```
+
+## What's new
+
+### 2026-04-26 — Initial public launch
+
+Six crates published to crates.io in a single batch:
+
+| Crate | Version | Highlight |
+|---|---|---|
+| [`ferro-blob-store`](https://crates.io/crates/ferro-blob-store) | `v0.0.3` | foundation: 5-method async `BlobStore` trait + in-memory + filesystem backends |
+| [`ferro-lumberjack`](https://crates.io/crates/ferro-lumberjack) | `v0.1.0` | Logstash Lumberjack v2 — frame codec + async client + async server + TLS |
+| [`ferro-airflow-dag-parser`](https://crates.io/crates/ferro-airflow-dag-parser) | `v0.0.1` | static AST extraction of Apache Airflow™ DAG files (no CPython) |
+| [`ferro-maven-layout`](https://crates.io/crates/ferro-maven-layout) | `v0.0.1` | Maven Repository Layout 2.0 + Axum router |
+| [`ferro-cargo-registry-server`](https://crates.io/crates/ferro-cargo-registry-server) | `v0.0.1` | embeddable Cargo Alternative Registry sparse-index server primitives |
+| [`ferro-oci-server`](https://crates.io/crates/ferro-oci-server) | `v0.0.1` | embeddable OCI Distribution v1.1 server primitives |
+
+The full launch story is at [Building Ferro](https://ferro.abyo.net/blog/building-ferro/).
+
+## Why these six together
+
+Three of the crates (`ferro-oci-server`, `ferro-maven-layout`,
+`ferro-cargo-registry-server`) sit on the same storage abstraction:
+the [`BlobStore`](https://docs.rs/ferro-blob-store) trait. Pick a
+storage backend once, then mount any combination of registries on
+top of it. That dependency shape is what justifies the workspace:
+
+```text
+ferro-blob-store  ←──┬── ferro-oci-server         (OCI Distribution v1.1)
+                     ├── ferro-maven-layout       (Maven Layout 2.0 + HTTP)
+                     └── ferro-cargo-registry-server  (Cargo Alt Registry)
+
+ferro-lumberjack             (no shared deps — standalone codec + client + server)
+ferro-airflow-dag-parser     (no shared deps — standalone static parser)
+```
+
+Each crate in this workspace started its life as part of a Ferro
+product (FerroSearch, FerroStream, FerroBeat, FerroAir, FerroAuth,
+FerroRepo, …) and was extracted into a narrowly-scoped, standalone
+release.
 
 ## Why this exists
 
 The Rust ecosystem has many high-quality protocol *clients* (Kafka, OCI
-distribution, Cassandra CQL, MQTT, …) but is missing primitives in several
-load-bearing areas:
+distribution, Cassandra CQL, MQTT, …) but is missing primitives in
+several load-bearing areas:
 
 - **Server-side OCI Distribution** — Rust has clients (`oci-client`,
-  `oci-spec`) but no public server crate.
-- **Cargo Alternative Registry server** — the protocol is documented but
-  not surfaced as a reusable library.
+  `oci-spec`) but no embeddable server primitives. The dominant open
+  registries (Harbor, zot, distribution/distribution) are all Go.
+- **Cargo Alternative Registry server primitives** — RFC 2141 was
+  accepted in 2018, but the only widely-known full server
+  ([`alexandrie`](https://github.com/Hirevo/alexandrie)) is a
+  standalone application, not a library you embed.
 - **Maven Repository Layout 2.0** — no Rust implementation at all.
 - **Logstash Lumberjack v2** — no Rust implementation at all.
-- **Static-only Apache Airflow™ DAG parsing** — completely absent in any
-  language outside Airflow itself.
+- **Static-only Apache Airflow™ DAG parsing** — completely absent in
+  any language outside Airflow itself.
 - **Painless / ES|QL / EQL / AQL** parsers and various PyPI / Helm /
   Go-module registry primitives — partial or absent.
 
-These gaps showed up while building the Ferro products. Rather than keep
-the implementations private, we publish them here on the same terms as
-the rest of the Rust ecosystem (Apache-2.0).
+These gaps showed up while building the Ferro products. Rather than
+keep the implementations private, we publish them here on the same
+terms as the rest of the Rust ecosystem (Apache-2.0).
 
 ## Status
 
@@ -64,14 +115,14 @@ ferro-protocols/
 ├── rust-toolchain.toml    — pinned toolchain (1.91.1)
 ├── rustfmt.toml
 ├── crates/
-│   └── ferro-lumberjack/  — Logstash Lumberjack v2 protocol primitives
-│       ├── src/
-│       ├── tests/
-│       ├── benches/
-│       ├── examples/
-│       └── fuzz/
+│   ├── ferro-blob-store/              — async BlobStore trait + InMem + Fs backends
+│   ├── ferro-lumberjack/              — Logstash Lumberjack v2 codec + client + server + TLS
+│   ├── ferro-airflow-dag-parser/      — Apache Airflow DAG static AST extractor
+│   ├── ferro-maven-layout/            — Maven Repository Layout 2.0 + Axum router
+│   ├── ferro-cargo-registry-server/   — Cargo Alternative Registry sparse-index server
+│   └── ferro-oci-server/              — OCI Distribution v1.1 server primitives
 └── .github/workflows/
-    ├── ci.yml             — check / clippy / fmt / test / coverage / audit / deny
+    ├── ci.yml             — check / clippy / fmt / test / coverage / audit / deny / docs
     ├── dco.yml            — DCO sign-off check on every PR
     ├── fuzz-nightly.yml   — nightly fuzzing for parsers
     ├── coverage.yml       — uploads cobertura artefact
