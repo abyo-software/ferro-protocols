@@ -84,6 +84,6 @@ standalone crate.
 - No `BatchSink` trait abstraction; clients must call `send_json`
   with explicit `Vec<Vec<u8>>` batches.
 
-[Unreleased]: https://github.com/youichi-uda/ferro-protocols/compare/ferro-lumberjack-v0.1.0...HEAD
-[0.1.0]: https://github.com/youichi-uda/ferro-protocols/compare/ferro-lumberjack-v0.0.1...ferro-lumberjack-v0.1.0
-[0.0.1]: https://github.com/youichi-uda/ferro-protocols/releases/tag/ferro-lumberjack-v0.0.1
+[Unreleased]: https://github.com/abyo-software/ferro-protocols/compare/ferro-lumberjack-v0.1.0...HEAD
+[0.1.0]: https://github.com/abyo-software/ferro-protocols/compare/ferro-lumberjack-v0.0.1...ferro-lumberjack-v0.1.0
+[0.0.1]: https://github.com/abyo-software/ferro-protocols/releases/tag/ferro-lumberjack-v0.0.1

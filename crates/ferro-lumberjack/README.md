@@ -27,8 +27,8 @@ ingestion endpoints).
 
 Part of the **Ferro ecosystem**.
 
-[`ferro-beat`]: https://github.com/youichi-uda/ferro-beat
-[`ferro-heartbeat`]: https://github.com/youichi-uda/ferro-heartbeat
+[`ferro-beat`]: https://github.com/abyo-software/ferro-beat
+[`ferro-heartbeat`]: https://github.com/abyo-software/ferro-heartbeat
 
 ## What this crate provides
 
@@ -192,10 +192,10 @@ while let Some(frame) = decoder.next_frame()? {
 
 ## Used in production by
 
-- [**FerroBeat**](https://github.com/youichi-uda/ferro-beat) — Filebeat-compatible
+- [**FerroBeat**](https://github.com/abyo-software/ferro-beat) — Filebeat-compatible
   Rust log shipper. (Source crate; will switch to `ferro-lumberjack`
   once published.)
-- [**FerroHeartbeat**](https://github.com/youichi-uda/ferro-heartbeat) — Heartbeat-compatible
+- [**FerroHeartbeat**](https://github.com/abyo-software/ferro-heartbeat) — Heartbeat-compatible
   monitor. (Source crate; will switch once published.)
 
 ## Triage policy

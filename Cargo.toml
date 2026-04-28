@@ -9,9 +9,9 @@ version = "0.0.0"
 edition = "2024"
 rust-version = "1.88"
 license = "Apache-2.0"
-homepage = "https://github.com/youichi-uda/ferro-protocols"
-repository = "https://github.com/youichi-uda/ferro-protocols"
-authors = ["Youichi Uda <youichi.uda@gmail.com>"]
+homepage = "https://github.com/abyo-software/ferro-protocols"
+repository = "https://github.com/abyo-software/ferro-protocols"
+authors = ["abyo software 合同会社 (abyo software LLC) <dev@abyo.net>"]
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

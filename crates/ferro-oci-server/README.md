@@ -109,7 +109,7 @@ the same as passing the official conformance harness.
 
 Vendoring the upstream Go-based conformance suite into the test
 matrix is tracked in
-[issue #1](https://github.com/youichi-uda/ferro-protocols/issues/1).
+[issue #1](https://github.com/abyo-software/ferro-protocols/issues/1).
 Persistent metadata backends (SQLite / Postgres) and an
 authentication trait are also gated against `v0.1.0`.
 

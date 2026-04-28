@@ -24,7 +24,7 @@ under Apache-2.0, so the parts of the work that have value
 independent of the products themselves can ship to crates.io and
 be used by anyone.
 
-[repo]: https://github.com/youichi-uda/ferro-protocols
+[repo]: https://github.com/abyo-software/ferro-protocols
 
 ## Why rewrite all of it
 

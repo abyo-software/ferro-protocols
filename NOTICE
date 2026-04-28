@@ -1,8 +1,8 @@
 ferro-protocols
-Copyright 2026 Youichi Uda and contributors
+Copyright 2026 abyo software 合同会社 (abyo software LLC) and contributors
 
 This product includes software developed as part of the Ferro ecosystem
-(https://github.com/youichi-uda).
+(https://github.com/abyo-software).
 
 Individual crates in this workspace are extracted from production use in
 the Ferro ecosystem of Rust-native rewrites of JVM/Python data

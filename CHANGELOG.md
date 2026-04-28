@@ -37,4 +37,4 @@ breaking API changes between releases; that contract becomes strict at
   primitives. See
   [`crates/ferro-oci-server/CHANGELOG.md`](crates/ferro-oci-server/CHANGELOG.md).
 
-[Unreleased]: https://github.com/youichi-uda/ferro-protocols/commits/main
+[Unreleased]: https://github.com/abyo-software/ferro-protocols/commits/main

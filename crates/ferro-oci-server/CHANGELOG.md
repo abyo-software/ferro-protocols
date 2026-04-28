@@ -34,5 +34,5 @@ Initial extraction from FerroRepo's OCI protocol crate.
   `v0.0.x` follow-ups; the trait is stable enough that you can
   implement your own today.
 
-[Unreleased]: https://github.com/youichi-uda/ferro-protocols/compare/ferro-oci-server-v0.0.1...HEAD
-[0.0.1]: https://github.com/youichi-uda/ferro-protocols/releases/tag/ferro-oci-server-v0.0.1
+[Unreleased]: https://github.com/abyo-software/ferro-protocols/compare/ferro-oci-server-v0.0.1...HEAD
+[0.0.1]: https://github.com/abyo-software/ferro-protocols/releases/tag/ferro-oci-server-v0.0.1

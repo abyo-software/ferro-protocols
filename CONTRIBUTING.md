@@ -138,6 +138,6 @@ with code, not with people.
 ## Questions
 
 Open a
-[GitHub Discussion](https://github.com/youichi-uda/ferro-protocols/discussions)
+[GitHub Discussion](https://github.com/abyo-software/ferro-protocols/discussions)
 for design or usage questions. File an issue only when you have
 something a maintainer should act on.

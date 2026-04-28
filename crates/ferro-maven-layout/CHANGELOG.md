@@ -24,5 +24,5 @@ Initial extraction from FerroRepo's Maven protocol crate.
   `GET / HEAD / PUT / DELETE` against a [`ferro_blob_store::BlobStore`]
 - `MavenError` with `IntoResponse` for Axum integration
 
-[Unreleased]: https://github.com/youichi-uda/ferro-protocols/compare/ferro-maven-layout-v0.0.1...HEAD
-[0.0.1]: https://github.com/youichi-uda/ferro-protocols/releases/tag/ferro-maven-layout-v0.0.1
+[Unreleased]: https://github.com/abyo-software/ferro-protocols/compare/ferro-maven-layout-v0.0.1...HEAD
+[0.0.1]: https://github.com/abyo-software/ferro-protocols/releases/tag/ferro-maven-layout-v0.0.1

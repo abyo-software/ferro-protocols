@@ -11,7 +11,7 @@ Instead, report privately via one of:
 
 1. **GitHub Security Advisories** — preferred. Use the "Report a
    vulnerability" button on
-   <https://github.com/youichi-uda/ferro-protocols/security/advisories/new>.
+   <https://github.com/abyo-software/ferro-protocols/security/advisories/new>.
    This creates a private channel between you and the maintainers and
    coordinates a CVE if one is warranted.
 2. **Email** the maintainers (address is in the repository profile).

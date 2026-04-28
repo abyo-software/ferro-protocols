@@ -2,8 +2,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: Question or design discussion
-    url: https://github.com/youichi-uda/ferro-protocols/discussions
+    url: https://github.com/abyo-software/ferro-protocols/discussions
     about: Use GitHub Discussions for questions, ideas, and design feedback. Issues are for actionable bug reports and tracked feature work only.
   - name: Security report
-    url: https://github.com/youichi-uda/ferro-protocols/security/advisories/new
+    url: https://github.com/abyo-software/ferro-protocols/security/advisories/new
     about: Report a security vulnerability privately. Do NOT open a public issue.

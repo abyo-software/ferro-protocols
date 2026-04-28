@@ -43,5 +43,5 @@ Initial extraction from the FerroRepo storage layer.
   backend, layout `<root>/<algo>/<2-char-prefix>/<rest-of-hex>`.
 - `BlobStoreError` enum (Io, Digest, NotFound, InvalidDigest).
 
-[Unreleased]: https://github.com/youichi-uda/ferro-protocols/compare/ferro-blob-store-v0.0.1...HEAD
-[0.0.1]: https://github.com/youichi-uda/ferro-protocols/releases/tag/ferro-blob-store-v0.0.1
+[Unreleased]: https://github.com/abyo-software/ferro-protocols/compare/ferro-blob-store-v0.0.1...HEAD
+[0.0.1]: https://github.com/abyo-software/ferro-protocols/releases/tag/ferro-blob-store-v0.0.1

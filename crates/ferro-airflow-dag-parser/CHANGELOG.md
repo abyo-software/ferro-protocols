@@ -50,5 +50,5 @@ Initial extraction from FerroAir into a standalone crate.
 - Identifier validation uses `chars().count()` (not byte length) to
   match the upstream Python implementation.
 
-[Unreleased]: https://github.com/youichi-uda/ferro-protocols/compare/ferro-airflow-dag-parser-v0.0.1...HEAD
-[0.0.1]: https://github.com/youichi-uda/ferro-protocols/releases/tag/ferro-airflow-dag-parser-v0.0.1
+[Unreleased]: https://github.com/abyo-software/ferro-protocols/compare/ferro-airflow-dag-parser-v0.0.1...HEAD
+[0.0.1]: https://github.com/abyo-software/ferro-protocols/releases/tag/ferro-airflow-dag-parser-v0.0.1

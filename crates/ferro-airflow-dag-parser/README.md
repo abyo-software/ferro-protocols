@@ -28,7 +28,7 @@ running the source.
 > determined by looking at the Python AST alone.
 
 Part of the **Ferro ecosystem**. Extracted from production use in
-[FerroAir](https://github.com/youichi-uda/ferro-air) (an Airflow-3-compatible orchestrator written in Rust).
+[FerroAir](https://github.com/abyo-software/ferro-air) (an Airflow-3-compatible orchestrator written in Rust).
 
 ## What this saves you
 
@@ -56,7 +56,7 @@ We have not yet published a head-to-head benchmark against the
 upstream `DagBag` import path, so the speedup figure above is a
 back-of-the-envelope claim from comparing component costs (Python
 import vs Rust AST walk on equivalent inputs). Production figures
-will land alongside the [`FerroAir`](https://github.com/youichi-uda/ferro-air) performance report.
+will land alongside the [`FerroAir`](https://github.com/abyo-software/ferro-air) performance report.
 
 ## What this crate does
 
@@ -176,7 +176,7 @@ workspace's Apache-2.0-clean license profile.
 | Aspect | Status |
 |---|---|
 | API stability | **alpha** (`v0.0.x` — breaking changes allowed at any release) |
-| Use in production | Yes, in [FerroAir](https://github.com/youichi-uda/ferro-air) |
+| Use in production | Yes, in [FerroAir](https://github.com/abyo-software/ferro-air) |
 | MSRV | rustc **1.88** |
 | Coverage target | 80%+ line; current measured in CI |
 | Async runtime | None (synchronous; the `ParseCache` uses `dashmap` for thread safety) |
@@ -184,7 +184,7 @@ workspace's Apache-2.0-clean license profile.
 
 ## Used in production by
 
-- [**FerroAir**](https://github.com/youichi-uda/ferro-air) — Apache
+- [**FerroAir**](https://github.com/abyo-software/ferro-air) — Apache
   Airflow-3-compatible orchestrator written in Rust. The static
   fast-path uses this crate (private at time of writing; will switch
   to `ferro-airflow-dag-parser` once published).
