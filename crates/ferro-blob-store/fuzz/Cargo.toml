@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: Apache-2.0
+[workspace]
+# fuzz dirs are excluded from the parent workspace via
+# `workspace.exclude` in the root Cargo.toml; this empty table marks
+# the fuzz package as its own standalone workspace so cargo-fuzz can
+# build it without conflict.
+
+[package]
+name = "ferro-blob-store-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "Apache-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+ferro-blob-store = { path = ".." }
+
+[[bin]]
+name = "parse_digest"
+path = "fuzz_targets/parse_digest.rs"
+test = false
+doc = false
+bench = false
