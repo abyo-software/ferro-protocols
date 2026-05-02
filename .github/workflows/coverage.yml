@@ -15,7 +15,7 @@ concurrency:
 jobs:
   llvm-cov:
     name: cargo llvm-cov
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, kvm]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

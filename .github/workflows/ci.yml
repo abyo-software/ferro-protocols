@@ -20,7 +20,7 @@ concurrency:
 jobs:
   check:
     name: cargo check
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, kvm]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -32,7 +32,7 @@ jobs:
 
   clippy:
     name: clippy (-D warnings)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, kvm]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -44,7 +44,7 @@ jobs:
 
   fmt:
     name: cargo fmt
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, kvm]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -70,7 +70,7 @@ jobs:
 
   msrv:
     name: MSRV (1.88)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, kvm]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -83,7 +83,7 @@ jobs:
 
   deny:
     name: cargo deny
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, kvm]
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
@@ -93,7 +93,7 @@ jobs:
 
   audit:
     name: cargo audit
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, kvm]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -106,7 +106,7 @@ jobs:
 
   docs:
     name: cargo doc
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, kvm]
     env:
       RUSTDOCFLAGS: "-D warnings"
     steps:

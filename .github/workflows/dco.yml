@@ -8,7 +8,7 @@ on:
 jobs:
   dco:
     name: DCO sign-off check
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, kvm]
     steps:
       - uses: actions/checkout@v4
         with:
