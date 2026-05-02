@@ -1,0 +1,69 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# ferro-protocols fuzzing harness (cargo-fuzz / libfuzzer).
+#
+# This crate is intentionally NOT a member of the top-level workspace —
+# cargo-fuzz requires nightly-only compiler flags that would taint the
+# stable workspace build. The parent `Cargo.toml` already excludes
+# `crates/*/fuzz` via `exclude = ["crates/*/fuzz"]`; this top-level
+# `fuzz/` directory is its own workspace root via `[workspace]`.
+#
+# Drive it via `cd fuzz && cargo +nightly fuzz <cmd>` (see
+# `~/fuzz-runner/run-fuzz.sh` for the nightly 24h runner invocation
+# pattern shared with ferro-stash / ferro-flow / ferrosca / ferrostream
+# / ferrosearch / ferroconnect).
+
+[package]
+name = "ferro-protocols-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+# Path-deps into the workspace crates whose decode/parse boundaries we
+# fuzz. Versions are pinned to `path =` so cargo rebuilds the exact
+# in-tree source on every fuzz run.
+# `ferro-lumberjack` defaults pull `client + server + tls` (tokio +
+# rustls) which we do not need for the wire-frame decoder; turn them
+# off to keep the fuzz binary lean.
+ferro-lumberjack = { path = "../crates/ferro-lumberjack", default-features = false }
+# `ferro-maven-layout` exposes `pub mod router;` unconditionally in
+# `lib.rs:32`, so its compilation requires the `http` feature even
+# when we only fuzz the pure parser layer. Keep the default feature
+# set; the surplus `axum`/`tokio` deps cost us only build time.
+ferro-maven-layout = { path = "../crates/ferro-maven-layout" }
+ferro-airflow-dag-parser = { path = "../crates/ferro-airflow-dag-parser" }
+
+[[bin]]
+name = "lumberjack_frame_decode"
+path = "fuzz_targets/lumberjack_frame_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "maven_pom_parse"
+path = "fuzz_targets/maven_pom_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "airflow_dag_extract"
+path = "fuzz_targets/airflow_dag_extract.rs"
+test = false
+doc = false
+bench = false
+
+# Prevent surprise inclusion in the parent workspace. Cargo treats a
+# `[workspace]` key as "I am my own workspace root".
+[workspace]
+
+[profile.release]
+debug = 1
