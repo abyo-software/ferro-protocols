@@ -22,9 +22,37 @@ use ruff_python_parser::{ParseError as RuffParseError, Parsed};
 
 use crate::common::ParseError;
 
+/// Maximum bracket nesting depth we hand to `ruff_python_parser`.
+///
+/// `catch_unwind` only catches Rust panics. A deeply-nested expression
+/// such as `((((... 200×` triggers a recursive descent in the upstream
+/// parser that overflows the thread stack, which Linux delivers as
+/// `SIGSEGV` and aborts the process before the unwinder runs. The
+/// `panic_safe` shim cannot recover from that, so we pre-screen for
+/// pathological bracket nesting and reject it as a parse error before
+/// the parser ever sees it.
+///
+/// 32 is the smallest cap that comfortably covers legitimate Airflow
+/// DAG nesting (real DAGs almost never exceed depth 10, even with
+/// nested `with DAG(...)` and `BashOperator(task_id=..., bash_command=
+/// f"...")` shapes), while rejecting the fuzz corpus
+/// (`crash-bd9f087c...` opens 47 brackets without closure and lex-paths
+/// the parser into a 60+-frame recursive descent that exits via
+/// SIGSEGV on the default thread stack). Independent stack-overflow
+/// tests in `tests/parser_stack_safety.rs` confirm depth 32 stays
+/// well under the observed overflow point.
+const MAX_BRACKET_DEPTH: usize = 32;
+
 /// Parse a Python module while isolating any panic from the upstream
-/// parser as [`ParseError::Internal`].
+/// parser as [`ParseError::Internal`], and any stack-overflow class
+/// failure as [`ParseError::Parse`].
 pub fn parse_module_safely(source: &str) -> Result<Parsed<ruff_python_ast::ModModule>, ParseError> {
+    if let Some(depth) = max_bracket_depth_exceeds(source, MAX_BRACKET_DEPTH) {
+        return Err(ParseError::Parse(format!(
+            "input rejected: bracket nesting depth {depth} exceeds {MAX_BRACKET_DEPTH} \
+             (would risk stack overflow in upstream parser)"
+        )));
+    }
     let result: Result<Result<Parsed<_>, RuffParseError>, _> =
         std::panic::catch_unwind(AssertUnwindSafe(|| ruff_parser::parse_module(source)));
     match result {
@@ -37,6 +65,31 @@ pub fn parse_module_safely(source: &str) -> Result<Parsed<ruff_python_ast::ModMo
             )))
         }
     }
+}
+
+/// Walk `source` once and return the first depth that exceeds `limit`,
+/// or `None` if the source stays within bounds. Counts opening
+/// brackets `(`, `[`, `{` and pairs them with `)`, `]`, `}`. String
+/// literals and comments are NOT excluded — that would require a real
+/// tokenizer; the resulting false positives are harmless because
+/// `MAX_BRACKET_DEPTH` is far above what real code uses.
+fn max_bracket_depth_exceeds(source: &str, limit: usize) -> Option<usize> {
+    let mut depth: usize = 0;
+    for &b in source.as_bytes() {
+        match b {
+            b'(' | b'[' | b'{' => {
+                depth = depth.saturating_add(1);
+                if depth > limit {
+                    return Some(depth);
+                }
+            }
+            b')' | b']' | b'}' => {
+                depth = depth.saturating_sub(1);
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
@@ -61,6 +114,34 @@ mod tests {
     fn parser_error_returns_parse_variant() {
         let err = parse_module_safely("def !!!").expect_err("must error");
         assert!(matches!(err, ParseError::Parse(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn deep_bracket_nesting_rejected_before_parser() {
+        // 1000× `(` without closure — far above MAX_BRACKET_DEPTH.
+        // Pre-fix this would recursive-descend into the upstream
+        // parser and SIGSEGV on stack overflow; the shim now turns
+        // that into a graceful `ParseError::Parse`.
+        let src = "(".repeat(1000);
+        let err = parse_module_safely(&src).expect_err("must reject");
+        match err {
+            ParseError::Parse(msg) => {
+                assert!(
+                    msg.contains("bracket nesting depth"),
+                    "unexpected message: {msg}"
+                );
+            }
+            other => panic!("expected Parse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn moderate_nesting_passes_to_parser() {
+        // 16 nested calls — well within MAX_BRACKET_DEPTH (32). The
+        // upstream parser handles this; the test pins the cap is
+        // generous enough for real-world DAG shapes.
+        let src = "x = ".to_string() + &"(".repeat(16) + "1" + &")".repeat(16) + "\n";
+        let _ = parse_module_safely(&src).expect("must parse");
     }
 
     /// Regression test for an upstream `littrs-ruff-python-parser` panic
