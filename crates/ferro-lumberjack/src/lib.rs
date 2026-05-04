@@ -2,6 +2,27 @@
 #![doc = include_str!("../README.md")]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![deny(missing_docs)]
+#![deny(rustdoc::broken_intra_doc_links)]
+
+// ---------------------------------------------------------------------------
+// API stability — semver commitment (effective `v0.2.0`)
+// ---------------------------------------------------------------------------
+//
+// From `v0.2.0` onward the public API surface re-exported below is a
+// stable contract: breaking changes (renames, removals, signature
+// changes that aren't strict additions) require a major-version bump
+// to `1.0.0`. Minor releases (`0.2.x`) may add new items and may
+// `#[deprecate]` existing ones, but will not remove them.
+//
+// Items NOT covered by this commitment:
+//
+// - Anything reachable only via `#[doc(hidden)]`.
+// - Behavioural details documented as "implementation-defined"
+//   (e.g. exact compaction thresholds in `FrameDecoder`).
+// - Future feature-gated additions: a new optional feature may be
+//   added without bumping major.
+//
+// See `CHANGELOG.md` for the canonical history.
 
 mod error;
 pub mod frame;

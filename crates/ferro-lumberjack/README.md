@@ -21,9 +21,12 @@ ingestion endpoints).
 > production use in [`ferro-beat`] (Filebeat-compatible log shipper)
 > and [`ferro-heartbeat`] (Heartbeat-compatible monitor).
 
-> **Beta (`v0.1.0`).** Both client and server primitives are
-> available. The public API is stable for the `0.1.x` series — minor
-> releases may deprecate but not remove APIs. See [Status](#status).
+> **Stable (`v0.2.0`).** Both client and server primitives are
+> available and exercised by 6 client↔server end-to-end tests plus
+> production deployment in [`ferro-beat`] and [`ferro-heartbeat`].
+> From `v0.2.0` onward the public API surface is a semver commitment:
+> breaking changes require a major bump to `1.0.0`. See
+> [Status](#status).
 
 Part of the **Ferro ecosystem**.
 
@@ -91,7 +94,7 @@ long-lived connections that send more than `u32::MAX` events.
 
 | Aspect | Status |
 |---|---|
-| API stability | **beta** (`v0.1.x` — semver applies) |
+| API stability | **stable** (`v0.2.x` — strict semver from `0.2.0`) |
 | Client | working, used in production by `ferro-beat` / `ferro-heartbeat` |
 | Server | working, exercised by 6 client↔server end-to-end tests |
 | TLS | rustls 0.23 + tokio-rustls 0.26; no openssl, both directions |
@@ -99,6 +102,21 @@ long-lived connections that send more than `u32::MAX` events.
 | Fuzz harness | `parse_frame` (decoder) — covered nightly |
 | Coverage target | 80%+ line; current measured in CI |
 | Async runtime | Tokio (no other runtime supported) |
+
+### API stability commitment (effective `v0.2.0`)
+
+From `v0.2.0` onward the entire public API surface re-exported from
+[`lib.rs`](src/lib.rs) is a semver contract:
+
+- **Breaking changes** (renames, removals, or signature changes that
+  aren't strict additions) require a **major** bump to `1.0.0`.
+- **Minor releases** (`0.2.x`) may add new items and may
+  `#[deprecate]` existing ones, but will not remove them.
+- **Behavioural details** documented as "implementation-defined" —
+  e.g. the exact `FrameDecoder` compaction threshold — are *not*
+  covered.
+- Adding a new **optional Cargo feature** (or new variants to a
+  `#[non_exhaustive]` enum) is *not* a breaking change.
 
 ## Quick start (client)
 

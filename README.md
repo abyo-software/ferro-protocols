@@ -32,7 +32,7 @@ Six crates published to crates.io in a single batch:
 | Crate | Version | Highlight |
 |---|---|---|
 | [`ferro-blob-store`](https://crates.io/crates/ferro-blob-store) | `v0.0.3` | foundation: 5-method async `BlobStore` trait + in-memory + filesystem backends |
-| [`ferro-lumberjack`](https://crates.io/crates/ferro-lumberjack) | `v0.1.0` | Logstash Lumberjack v2 — frame codec + async client + async server + TLS |
+| [`ferro-lumberjack`](https://crates.io/crates/ferro-lumberjack) | `v0.2.0` | Logstash Lumberjack v2 — frame codec + async client + async server + TLS |
 | [`ferro-airflow-dag-parser`](https://crates.io/crates/ferro-airflow-dag-parser) | `v0.0.1` | static AST extraction of Apache Airflow™ DAG files (no CPython) |
 | [`ferro-maven-layout`](https://crates.io/crates/ferro-maven-layout) | `v0.0.1` | Maven Repository Layout 2.0 + Axum router |
 | [`ferro-cargo-registry-server`](https://crates.io/crates/ferro-cargo-registry-server) | `v0.0.1` | embeddable Cargo Alternative Registry sparse-index server primitives |
@@ -95,7 +95,7 @@ terms as the rest of the Rust ecosystem (Apache-2.0).
 | Crate | Version | Extracted from | Status |
 |---|---|---|---|
 | [`ferro-blob-store`](crates/ferro-blob-store/README.md) | `v0.0.3` | FerroRepo storage | alpha — content-addressed `BlobStore` trait + in-memory + filesystem backends; foundation for OCI / Maven / Cargo crates below |
-| [`ferro-lumberjack`](crates/ferro-lumberjack/README.md) | `v0.1.0` | `ferro-beat` / `ferro-heartbeat` | beta — Logstash Lumberjack v2 codec + client + server + TLS |
+| [`ferro-lumberjack`](crates/ferro-lumberjack/README.md) | `v0.2.0` | `ferro-beat` / `ferro-heartbeat` | stable — Logstash Lumberjack v2 codec + client + server + TLS (semver from `0.2.0`) |
 | [`ferro-airflow-dag-parser`](crates/ferro-airflow-dag-parser/README.md) | `v0.0.1` | `ferro-air` | alpha — static AST DAG extraction (ruff backend, 7 dynamic-fallback markers) |
 | [`ferro-maven-layout`](crates/ferro-maven-layout/README.md) | `v0.0.1` | FerroRepo Maven | alpha — Maven Repository Layout 2.0 + Axum router |
 | [`ferro-cargo-registry-server`](crates/ferro-cargo-registry-server/README.md) | `v0.0.1` | FerroRepo Cargo | alpha — Cargo Alternative Registry sparse-index server |

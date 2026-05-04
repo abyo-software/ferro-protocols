@@ -12,6 +12,48 @@ public items.
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-05-04
+
+Promotion to stable status. **No API breakage** versus `v0.1.0`; this
+release is a deliberate signal that the public surface is now under a
+strict semver contract.
+
+### API stability commitment
+
+From `v0.2.0` onward the public API re-exported from `lib.rs` is a
+semver contract:
+
+- **Breaking changes** (renames, removals, signature changes that
+  aren't strict additions) require a **major** bump to `1.0.0`.
+- **Minor releases** (`0.2.x`) may add new items and may
+  `#[deprecate]` existing ones, but will not remove them.
+- **Behavioural** details documented as "implementation-defined" —
+  e.g. the exact `FrameDecoder` compaction threshold — are *not*
+  covered by the contract.
+- Adding a new **optional Cargo feature** (or new variants to a
+  `#[non_exhaustive]` enum) is *not* a breaking change.
+
+### Added
+
+- `examples/frame_codec.rs` — pure codec example (no Tokio, no
+  async runtime). Demonstrates the round-trip for sync-runtime
+  consumers.
+- Crate-level documentation block in `lib.rs` explaining the semver
+  commitment and what is / isn't covered.
+- README "API stability commitment" section mirroring the same
+  contract.
+- `#![deny(rustdoc::broken_intra_doc_links)]` for the crate root.
+
+### Notes
+
+- All 66 existing tests (lib unit, integration, e2e, doctests) pass
+  unchanged. Public API surface is byte-identical to `v0.1.0`.
+- The `parse_frame` libFuzzer target has been part of the nightly
+  fuzz rotation since `v0.0.1`; no decoder-state findings to date.
+- Examples now total three: `echo_server`, `send_event`,
+  `frame_codec`. The first two require `--features client,server`
+  (default); the third runs with `--no-default-features`.
+
 ## [0.1.0] — 2026-04-25
 
 First release with both client and server primitives. Suitable for
@@ -84,6 +126,7 @@ standalone crate.
 - No `BatchSink` trait abstraction; clients must call `send_json`
   with explicit `Vec<Vec<u8>>` batches.
 
-[Unreleased]: https://github.com/abyo-software/ferro-protocols/compare/ferro-lumberjack-v0.1.0...HEAD
+[Unreleased]: https://github.com/abyo-software/ferro-protocols/compare/ferro-lumberjack-v0.2.0...HEAD
+[0.2.0]: https://github.com/abyo-software/ferro-protocols/compare/ferro-lumberjack-v0.1.0...ferro-lumberjack-v0.2.0
 [0.1.0]: https://github.com/abyo-software/ferro-protocols/compare/ferro-lumberjack-v0.0.1...ferro-lumberjack-v0.1.0
 [0.0.1]: https://github.com/abyo-software/ferro-protocols/releases/tag/ferro-lumberjack-v0.0.1

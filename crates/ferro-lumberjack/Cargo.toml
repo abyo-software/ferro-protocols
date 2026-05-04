@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 [package]
 name = "ferro-lumberjack"
-version = "0.1.0"
+version = "0.2.0"
 description = "Logstash Lumberjack v2 (Beats) protocol primitives: frame codec, async client, async server, TLS via rustls. Extracted from the Ferro ecosystem."
 categories = ["network-programming", "encoding"]
 keywords = ["lumberjack", "beats", "logstash", "protocol", "elastic"]
@@ -54,3 +54,17 @@ rustdoc-args = ["--cfg", "docsrs"]
 [[bench]]
 name = "encode_decode"
 harness = false
+
+# Examples — `frame_codec` runs with no default features (pure codec
+# only); the `client` / `server` examples require their respective
+# features so `cargo build --no-default-features` keeps working.
+[[example]]
+name = "echo_server"
+required-features = ["server"]
+
+[[example]]
+name = "send_event"
+required-features = ["client"]
+
+[[example]]
+name = "frame_codec"
