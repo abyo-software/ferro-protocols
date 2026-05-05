@@ -20,7 +20,9 @@ sparse-index variant.
 > ground: a `BlobStore`-backed Axum router you mount under any URL
 > prefix, inside whatever service you already run.
 
-> ⚠️ **Alpha (`v0.0.1`).** API will shift before `v0.1`.
+> 🟢 **Beta (`v0.1.0`).** Public API is stable for the `v0.1.x`
+> series; additive changes only between minors. Breaking changes
+> will be released as a separate `v0.2.0`.
 
 Part of the **Ferro ecosystem**. Extracted from FerroRepo, a
 private Rust artifact repository.
@@ -110,7 +112,7 @@ into the `router()` returned by this crate.
 
 | Aspect | Status |
 |---|---|
-| API stability | **alpha** (`v0.0.x`) |
+| API stability | **beta** (`v0.1.x`) — additive-only between minors |
 | Sparse index | working |
 | Git index | not yet |
 | Authentication | scaffold only — wire your own middleware |

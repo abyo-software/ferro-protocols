@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 [package]
 name = "ferro-maven-layout"
-version = "0.0.1"
+version = "0.1.0"
 description = "Apache Maven repository layout 2.0 — GAV parsing, maven-metadata.xml, POM minimal parser, SNAPSHOT versioning, SHA-1/SHA-256/MD5 checksums, plus an Axum HTTP router. Extracted from the Ferro ecosystem."
 categories = ["development-tools::build-utils", "parser-implementations", "web-programming::http-server"]
 keywords = ["maven", "repository", "gav", "axum", "registry"]
@@ -23,7 +23,7 @@ http = ["dep:axum", "dep:tokio", "dep:http", "dep:async-trait"]
 legacy-md5 = []
 
 [dependencies]
-ferro-blob-store = { version = "0.0", path = "../ferro-blob-store" }
+ferro-blob-store = { version = "0.1", path = "../ferro-blob-store" }
 bytes = "1"
 serde = { version = "1", features = ["derive"] }
 thiserror.workspace = true

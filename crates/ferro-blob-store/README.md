@@ -9,9 +9,10 @@ ecosystem. A deliberately tiny `async fn` trait (5 methods) plus
 two reference backends (in-memory + filesystem) plus a
 `Digest` newtype with SHA-256 / SHA-512 support.
 
-> ⚠️ **Alpha (`v0.0.1`).** API may change. The trait surface is
-> minimal on purpose so it stays stable as we add streaming
-> variants in `v0.1`.
+> 🟢 **Beta (`v0.1.0`).** Public API is stable for the `v0.1.x`
+> series; additive changes only between minors. The trait surface
+> is minimal on purpose so it stays stable as we add streaming
+> variants in `v0.2`.
 
 Part of the **Ferro ecosystem**. Used as the storage abstraction
 under [`ferro-oci-server`](https://crates.io/crates/ferro-oci-server),
@@ -36,7 +37,7 @@ and [`ferro-cargo-registry-server`](https://crates.io/crates/ferro-cargo-registr
 
 ## What this crate does **not** do
 
-- **Streaming** (`put_stream` / `get_stream`). Coming in `v0.1`.
+- **Streaming** (`put_stream` / `get_stream`). Targeted for `v0.2`.
 - **Cloud backends** (S3, GCS, Azure). Use the `object_store` crate
   family and write a 50-line adapter; the trait is small enough.
 - **Tiered storage** (Hot/Warm/Cold). The Ferro internal repo has a
@@ -80,9 +81,9 @@ store.put(&digest, body).await?;
 
 | Aspect | Status |
 |---|---|
-| API stability | **alpha** (`v0.0.x`) |
+| API stability | **beta** (`v0.1.x`) — additive-only between minors |
 | Backends | `InMemoryBlobStore` ✅ / `FsBlobStore` ✅ (default feature) |
-| Streaming I/O | not yet — `v0.1` target |
+| Streaming I/O | not yet — `v0.2` target |
 | MSRV | rustc **1.88** |
 | Async runtime | Tokio (for `FsBlobStore`); the trait itself is runtime-agnostic |
 

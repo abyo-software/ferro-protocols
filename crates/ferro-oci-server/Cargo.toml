@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 [package]
 name = "ferro-oci-server"
-version = "0.0.1"
+version = "0.1.0"
 description = "OCI Distribution Specification v1.1 server-side primitives — manifest / blob / tag / referrers handlers, chunked uploads, in-memory metadata plane. Backed by ferro-blob-store. Extracted from the Ferro ecosystem."
 categories = ["web-programming::http-server", "development-tools"]
 keywords = ["oci", "distribution", "registry", "docker", "axum"]
@@ -15,7 +15,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-ferro-blob-store = { version = "0.0.3", path = "../ferro-blob-store", features = ["serde"] }
+ferro-blob-store = { version = "0.1", path = "../ferro-blob-store", features = ["serde"] }
 axum = "0.8"
 tokio = { workspace = true, features = ["sync"] }
 bytes = "1"

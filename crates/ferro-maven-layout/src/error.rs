@@ -4,8 +4,14 @@
 //! Maps onto HTTP status codes at the REST boundary. Wraps
 //! [`ferro_blob_store::BlobStoreError`] transparently so storage and
 //! digest failures surface without a second translation step.
+//!
+//! The HTTP / `IntoResponse` integration is gated on the `http`
+//! feature; without it, the [`MavenError`] enum is still usable as a
+//! pure value type.
 
+#[cfg(feature = "http")]
 use axum::http::StatusCode;
+#[cfg(feature = "http")]
 use axum::response::{IntoResponse, Response};
 use ferro_blob_store::BlobStoreError;
 
@@ -43,6 +49,7 @@ pub enum MavenError {
     Storage(#[from] BlobStoreError),
 }
 
+#[cfg(feature = "http")]
 impl MavenError {
     /// HTTP status code for this error category.
     #[must_use]
@@ -59,6 +66,7 @@ impl MavenError {
     }
 }
 
+#[cfg(feature = "http")]
 fn storage_status(err: &BlobStoreError) -> StatusCode {
     match err {
         BlobStoreError::NotFound(_) => StatusCode::NOT_FOUND,
@@ -71,6 +79,7 @@ fn storage_status(err: &BlobStoreError) -> StatusCode {
     }
 }
 
+#[cfg(feature = "http")]
 impl IntoResponse for MavenError {
     fn into_response(self) -> Response {
         let status = self.status();
@@ -79,7 +88,7 @@ impl IntoResponse for MavenError {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "http"))]
 mod tests {
     use super::MavenError;
     use axum::http::StatusCode;

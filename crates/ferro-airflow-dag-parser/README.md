@@ -21,11 +21,12 @@ running the source.
 > leaves hanging: *what if the structural read didn't need
 > CPython at all?*
 
-> ⚠️ **Alpha (`v0.0.1`).** API will change between `0.0.x` releases.
-> The implementation is pulled from production use in the Ferro
-> ecosystem; it is the static fast-path that orchestrators use to
-> skip `CPython` evaluation when a DAG file's structure can be
-> determined by looking at the Python AST alone.
+> 🟢 **Beta (`v0.1.0`).** Public API is stable for the `v0.1.x`
+> series; additive changes only between minors. The implementation
+> is pulled from production use in the Ferro ecosystem; it is the
+> static fast-path that orchestrators use to skip `CPython`
+> evaluation when a DAG file's structure can be determined by
+> looking at the Python AST alone.
 
 Part of the **Ferro ecosystem**. Extracted from production use in
 [FerroAir](https://github.com/abyo-software/ferro-air) (an Airflow-3-compatible orchestrator written in Rust).
@@ -175,7 +176,7 @@ workspace's Apache-2.0-clean license profile.
 
 | Aspect | Status |
 |---|---|
-| API stability | **alpha** (`v0.0.x` — breaking changes allowed at any release) |
+| API stability | **beta** (`v0.1.x`) — additive-only between minors |
 | Use in production | Yes, in [FerroAir](https://github.com/abyo-software/ferro-air) |
 | MSRV | rustc **1.88** |
 | Coverage target | 80%+ line; current measured in CI |

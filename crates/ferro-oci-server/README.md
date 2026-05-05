@@ -23,8 +23,10 @@ metadata-plane trait that keeps the storage layer abstract.
 > answer for the OCI Distribution Spec server side. This crate is
 > a starting point for one.
 
-> ⚠️ **Alpha (`v0.0.1`).** API will shift before `v0.1`. See
-> [Roadmap to v0.1.0](#roadmap-to-v010) below for the explicit gate.
+> 🟢 **Beta (`v0.1.0`).** Public API is stable for the `v0.1.x`
+> series; additive changes only between minors. Conformance-suite
+> green-bar is tracked as a separate `v0.1.x` milestone (not the
+> version-bump gate).
 
 Part of the **Ferro ecosystem**. Extracted from FerroRepo, a private
 Rust artifact repository.
@@ -117,7 +119,7 @@ authentication trait are also gated against `v0.1.0`.
 
 | Aspect | Status |
 |---|---|
-| API stability | **alpha** (`v0.0.x`) |
+| API stability | **beta** (`v0.1.x`) — additive-only between minors |
 | Manifest / blob / tag / catalog / referrers handlers | working |
 | Chunked uploads | working |
 | Conformance suite | smoke tests only — formal harness pending |

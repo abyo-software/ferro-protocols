@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 [package]
 name = "ferro-cargo-registry-server"
-version = "0.0.1"
+version = "0.1.0"
 description = "Cargo Alternative Registry Protocol server-side primitives — sparse index, /config.json, publish/yank/owners API. Backed by ferro-blob-store. Extracted from the Ferro ecosystem."
 categories = ["development-tools::cargo-plugins", "web-programming::http-server"]
 keywords = ["cargo", "registry", "sparse-index", "axum", "alternative"]
@@ -15,7 +15,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-ferro-blob-store = { version = "0.0", path = "../ferro-blob-store" }
+ferro-blob-store = { version = "0.1", path = "../ferro-blob-store" }
 axum = "0.8"
 tokio = { workspace = true, features = ["sync"] }
 bytes = "1"

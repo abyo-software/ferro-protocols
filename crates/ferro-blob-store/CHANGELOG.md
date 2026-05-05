@@ -8,6 +8,27 @@ allowed between any two releases until `v0.1.0`.
 
 ## [Unreleased]
 
+## [0.1.0] — 2026-05-04
+
+First beta release. The crate has been stable since `v0.0.1`; this
+bump promotes it from the `v0.0.x` alpha track to the `v0.1.x` beta
+track to signal a higher level of API stability commitment.
+
+### Added
+- Beta track. `0.1.x` semver: minor bumps may add additive items;
+  removals or signature changes will be flagged in the CHANGELOG and
+  released as a separate `0.2.0`.
+- `examples/in_memory_round_trip.rs` — end-to-end demonstration
+  exercising every public method of [`BlobStore`].
+
+### Changed
+- README: API stability statement upgraded from "alpha" to "beta".
+- No code changes from `0.0.3`. The public surface is unchanged.
+
+### Notes
+- Streaming (`put_stream` / `get_stream`) and a paginated `list`
+  variant remain the named `0.2.0` deliverable.
+
 ## [0.0.3] — 2026-04-26
 
 ### Changed
@@ -43,5 +64,8 @@ Initial extraction from the FerroRepo storage layer.
   backend, layout `<root>/<algo>/<2-char-prefix>/<rest-of-hex>`.
 - `BlobStoreError` enum (Io, Digest, NotFound, InvalidDigest).
 
-[Unreleased]: https://github.com/abyo-software/ferro-protocols/compare/ferro-blob-store-v0.0.1...HEAD
+[Unreleased]: https://github.com/abyo-software/ferro-protocols/compare/ferro-blob-store-v0.1.0...HEAD
+[0.1.0]: https://github.com/abyo-software/ferro-protocols/releases/tag/ferro-blob-store-v0.1.0
+[0.0.3]: https://github.com/abyo-software/ferro-protocols/releases/tag/ferro-blob-store-v0.0.3
+[0.0.2]: https://github.com/abyo-software/ferro-protocols/releases/tag/ferro-blob-store-v0.0.2
 [0.0.1]: https://github.com/abyo-software/ferro-protocols/releases/tag/ferro-blob-store-v0.0.1

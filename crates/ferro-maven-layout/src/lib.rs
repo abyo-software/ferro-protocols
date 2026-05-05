@@ -21,16 +21,23 @@
 //! Central publisher staging validation land in Phase 2.
 
 #![deny(missing_docs)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 pub mod checksum;
 pub mod coordinate;
 pub mod error;
-pub mod handlers;
 pub mod layout;
 pub mod metadata;
 pub mod pom;
-pub mod router;
 pub mod snapshot;
+
+#[cfg(feature = "http")]
+#[cfg_attr(docsrs, doc(cfg(feature = "http")))]
+pub mod handlers;
+
+#[cfg(feature = "http")]
+#[cfg_attr(docsrs, doc(cfg(feature = "http")))]
+pub mod router;
 
 pub use checksum::{ChecksumAlgo, compute_checksum, parse_sidecar};
 pub use coordinate::{Coordinate, CoordinateParseError};
@@ -38,8 +45,11 @@ pub use error::MavenError;
 pub use layout::{LayoutPath, PathClass, parse_layout_path};
 pub use metadata::{MavenMetadata, Snapshot, SnapshotVersion};
 pub use pom::{Pom, PomParent, parse_pom};
-pub use router::{MavenState, router};
 pub use snapshot::{SnapshotTimestamp, is_snapshot_version};
+
+#[cfg(feature = "http")]
+#[cfg_attr(docsrs, doc(cfg(feature = "http")))]
+pub use router::{MavenState, router};
 
 /// Crate name, exposed for diagnostics and `/metrics` labelling.
 pub const CRATE_NAME: &str = "ferro-maven-layout";

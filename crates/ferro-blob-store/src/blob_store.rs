@@ -37,9 +37,9 @@ pub type SharedBlobStore = Arc<dyn BlobStore>;
 ///
 /// ### Future evolution
 ///
-/// `v0.1` will add `put_stream` / `get_stream` and a paginated
-/// `list` variant. The current method set is stable for the
-/// `v0.0.x` series.
+/// `v0.2` is targeted to add `put_stream` / `get_stream` and a
+/// paginated `list` variant. The current method set is stable for
+/// the `v0.1.x` series.
 #[async_trait]
 pub trait BlobStore: Send + Sync {
     /// Write `bytes` under `digest`. See [trait-level documentation](BlobStore)
@@ -61,8 +61,8 @@ pub trait BlobStore: Send + Sync {
 
     /// Enumerate every blob currently stored.
     ///
-    /// Returned in no particular order. The `v0.1` paginated variant
-    /// will supersede this method for backends where the full set
-    /// does not fit in memory.
+    /// Returned in no particular order. The targeted `v0.2`
+    /// paginated variant will supersede this method for backends
+    /// where the full set does not fit in memory.
     async fn list(&self) -> Result<Vec<Digest>>;
 }

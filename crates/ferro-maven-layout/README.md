@@ -9,7 +9,8 @@ parsing, `maven-metadata.xml`, minimal POM parser, SNAPSHOT timestamp +
 buildNumber, SHA-1 / SHA-256 / MD5 checksum helpers, and an Axum
 HTTP router that mounts the layout at any URL prefix.
 
-> ⚠️ **Alpha (`v0.0.1`).** API will shift before `v0.1`.
+> 🟢 **Beta (`v0.1.0`).** Public API is stable for the `v0.1.x`
+> series; additive changes only between minors.
 
 Part of the **Ferro ecosystem**. Extracted from FerroRepo, a private
 Rust artifact repository.
@@ -76,7 +77,7 @@ assert!(matches!(path.class, PathClass::Artifact { .. }));
 
 | Aspect | Status |
 |---|---|
-| API stability | **alpha** (`v0.0.x`) |
+| API stability | **beta** (`v0.1.x`) — additive-only between minors |
 | Feature: `http` (default) | Axum router + handlers |
 | Feature: `legacy-md5` | MD5 sidecar acceptance for Maven 2 clients |
 | MSRV | rustc **1.88** |

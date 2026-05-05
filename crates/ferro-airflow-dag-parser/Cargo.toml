@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 [package]
 name = "ferro-airflow-dag-parser"
-version = "0.0.1"
+version = "0.1.0"
 description = "Static AST-based extractor for Apache Airflow™ Python DAG files. Recovers dag_id, task_ids, dependencies, schedule, and dynamic-fallback markers without running the source. Extracted from the Ferro ecosystem."
 categories = ["development-tools", "parser-implementations"]
 keywords = ["airflow", "dag", "parser", "static-analysis", "python"]

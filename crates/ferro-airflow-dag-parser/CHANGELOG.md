@@ -2,10 +2,29 @@
 # Changelog — ferro-airflow-dag-parser
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
-This crate is currently in the `v0.0.x` alpha series; breaking changes
-are allowed between any two releases until `v0.1.0`.
+This crate is on the `v0.1.x` beta track; additive changes only
+between minor releases. Breaking changes will be released as a
+separate `v0.2.0`.
 
 ## [Unreleased]
+
+## [0.1.0] — 2026-05-04
+
+First beta release. Promotes the crate from the `v0.0.x` alpha track
+to the `v0.1.x` beta track to signal a higher level of API stability
+commitment.
+
+### Added
+- Beta track. `0.1.x` semver: minor bumps may add additive items;
+  removals or signature changes will be flagged in the CHANGELOG and
+  released as a separate `0.2.0`.
+- `examples/extract_dag.rs` — static fast-path extraction plus
+  dynamic-marker detection on a small `with DAG(...)` Python source.
+
+### Changed
+- No public-API breaking changes from `0.0.1`. `IdentifierError`
+  and `ParseError` carry `#[non_exhaustive]` so future variants are
+  minor-bump-safe.
 
 ### Removed (pre-publish hardening)
 - `parser-rustpython` feature and `rustpython_impl` module dropped
@@ -50,5 +69,6 @@ Initial extraction from FerroAir into a standalone crate.
 - Identifier validation uses `chars().count()` (not byte length) to
   match the upstream Python implementation.
 
-[Unreleased]: https://github.com/abyo-software/ferro-protocols/compare/ferro-airflow-dag-parser-v0.0.1...HEAD
+[Unreleased]: https://github.com/abyo-software/ferro-protocols/compare/ferro-airflow-dag-parser-v0.1.0...HEAD
+[0.1.0]: https://github.com/abyo-software/ferro-protocols/releases/tag/ferro-airflow-dag-parser-v0.1.0
 [0.0.1]: https://github.com/abyo-software/ferro-protocols/releases/tag/ferro-airflow-dag-parser-v0.0.1

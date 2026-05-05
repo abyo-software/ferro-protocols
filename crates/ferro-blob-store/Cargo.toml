@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 [package]
 name = "ferro-blob-store"
-version = "0.0.3"
+version = "0.1.0"
 description = "Async content-addressed blob-store trait + in-memory and filesystem backends. Foundation crate for ferro-oci-server, ferro-maven-layout, ferro-cargo-registry-server."
 categories = ["asynchronous", "filesystem", "data-structures"]
 keywords = ["blob", "storage", "content-addressed", "sha256", "registry"]

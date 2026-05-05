@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Axum HTTP round-trip tests for the Maven handler.
 //!
-//! Uses `tower::ServiceExt` to drive the router in-process.
+//! Uses `tower::ServiceExt` to drive the router in-process. Gated on
+//! the `http` feature so `--no-default-features` builds (which omit
+//! axum / tokio / async-trait) compile cleanly.
+
+#![cfg(feature = "http")]
 
 use std::sync::Arc;
 
