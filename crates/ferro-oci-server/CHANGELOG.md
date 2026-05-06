@@ -8,6 +8,16 @@ releases. Breaking changes will be released as a separate `v0.2.0`.
 
 ## [Unreleased]
 
+### Added
+- `tests/fixtures/` — vendored canonical OCI Image Spec v1.1 examples
+  (`oci-image-manifest.json`, `oci-image-index.json`) sourced from
+  `opencontainers/image-spec` (Apache-2.0).
+- `tests/conformance.rs` — 6 conformance tests parsing the upstream
+  fixtures into the typed `ImageManifest` / `ImageIndex` structs and
+  asserting round-trip stability and media-type classification. Closes
+  the v0.1.0 "vendor real-protocol fixtures" gate that was deferred to
+  the 0.1.x minor track in the 0.0.1 → 0.1.0 promotion notes.
+
 ## [0.1.0] — 2026-05-04
 
 First beta release. Promotes the crate from the `v0.0.x` alpha track

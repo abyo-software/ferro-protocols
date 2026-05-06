@@ -12,6 +12,20 @@ public items.
 
 ## [Unreleased]
 
+### Added
+- `tests/fixtures/beats_filebeat_window_v2.bin` and
+  `tests/fixtures/logstash_ack_v2.bin` — realistic-synthetic Lumberjack
+  v2 wire bytes corresponding to a Filebeat 8.15.0 → Logstash session
+  carrying two syslog events (Window(2) + JSON(seq=1) + JSON(seq=2))
+  and the matching ACK(seq=2). Bytes are byte-for-byte hand-derived
+  from the Lumberjack v2 spec; see `tests/fixtures/README.md` for
+  rationale on synthetic-vs-pcap.
+- `tests/conformance.rs` — 4 conformance tests that decode the
+  upstream wire bytes through `FrameDecoder`, validate the Filebeat
+  event field shape (`@timestamp`, `beat`, `log.file.path`, `log.offset`),
+  exercise 1-byte-per-feed split-feed equivalence, and assert the
+  raw header bytes match the Lumberjack v2 spec.
+
 ## [0.2.0] — 2026-05-04
 
 Promotion to stable status. **No API breakage** versus `v0.1.0`; this

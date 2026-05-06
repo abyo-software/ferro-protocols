@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+   Vendored excerpt of the real pom.xml published to Maven Central:
+   https://repo1.maven.org/maven2/org/apache/commons/commons-lang3/3.14.0/commons-lang3-3.14.0.pom
+
+   The full upstream POM is ~16 KB and includes plugin / profile blocks
+   that are out of scope for the layout-and-coordinate parser surface
+   exercised here. We retain the GAV header (groupId, artifactId,
+   version, packaging), the parent block, and a representative
+   dependency edge so that a parser that succeeds on this excerpt would
+   succeed on the upstream file.
+
+   License: Apache-2.0 (Apache Commons Lang).
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>org.apache.commons</groupId>
+    <artifactId>commons-parent</artifactId>
+    <version>69</version>
+  </parent>
+  <groupId>org.apache.commons</groupId>
+  <artifactId>commons-lang3</artifactId>
+  <version>3.14.0</version>
+  <name>Apache Commons Lang</name>
+  <packaging>jar</packaging>
+  <description>
+    Apache Commons Lang, a package of Java utility classes for the
+    classes that are in java.lang's hierarchy, or are considered to be so
+    standard as to justify existence in java.lang.
+  </description>
+  <url>https://commons.apache.org/proper/commons-lang/</url>
+  <inceptionYear>2001</inceptionYear>
+  <dependencies>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>5.10.1</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+</project>

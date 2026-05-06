@@ -8,6 +8,16 @@ releases. Breaking changes will be released as a separate `v0.2.0`.
 
 ## [Unreleased]
 
+### Added
+- `tests/fixtures/` — vendored real crates.io sparse-index lines for
+  `serde` (1.0.0 + 1.0.219) and `anyhow` (1.0.0 + 1.0.99), plus the
+  live `https://index.crates.io/config.json` shape.
+- `tests/conformance.rs` — 5 conformance tests that parse the upstream
+  index lines, validate dev-dep / `package`-rename / `features2`
+  preservation, and round-trip the lines through `render_lines` →
+  `parse_lines` to assert canonical-shape stability. Closes the v0.1.0
+  "vendor real-protocol fixtures" gate.
+
 ## [0.1.0] — 2026-05-04
 
 First beta release. Promotes the crate from the `v0.0.x` alpha track

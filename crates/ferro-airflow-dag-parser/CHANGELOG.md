@@ -8,6 +8,21 @@ separate `v0.2.0`.
 
 ## [Unreleased]
 
+### Added
+- `tests/fixtures/example_bash_operator.py` and `tests/fixtures/tutorial.py`
+  — vendored verbatim from `apache/airflow/airflow/example_dags/`
+  with their Apache-2.0 license headers preserved. Together they
+  exercise the canonical `with DAG(...) as dag` shape, multi-key
+  `default_args` literal, fan-out / fan-in `[a, b, c] >> d` list-shift
+  edges, and `EmptyOperator` import paths.
+- `tests/conformance.rs` — 6 conformance tests asserting `dag_id`
+  recovery, full `task_id` set recovery (7 tasks for
+  `example_bash_operator`, 3 for `tutorial`), `default_args` flag,
+  agreement between `extract_static_dag` and `extract_all_static_dags`,
+  and presence of the canonical fan-out edge `runme_0 →
+  run_after_loop`. Closes the "vendor real Airflow DAGs" remark from
+  the 0.0.1 → 0.1.0 promotion notes.
+
 ## [0.1.0] — 2026-05-04
 
 First beta release. Promotes the crate from the `v0.0.x` alpha track

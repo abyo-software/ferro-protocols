@@ -8,6 +8,19 @@ releases. Breaking changes will be released as a separate `v0.2.0`.
 
 ## [Unreleased]
 
+### Added
+- `tests/fixtures/` — vendored real Maven Central artefacts for
+  `org.apache.commons:commons-lang3:3.14.0`: the live
+  `commons-lang3-3.14.0.pom` GAV + parent block excerpt, and the
+  artifact-index `maven-metadata.xml` covering the 3.0 → 3.14.0 release
+  history (Apache-2.0 upstream, license header preserved).
+- `tests/conformance.rs` — 4 conformance tests that parse the upstream
+  POM into typed `Pom` / `PomParent` structs (asserting the apache
+  `commons-parent:69` parent-pointer is recovered) and the metadata
+  XML into `MavenMetadata` (asserting `<release>=3.14.0`,
+  `<latest>=3.14.0`, full versions list, and `<lastUpdated>` parse +
+  round-trip). Closes the v0.1.0 "vendor real-protocol fixtures" gate.
+
 ## [0.1.0] — 2026-05-04
 
 First beta release. Promotes the crate from the `v0.0.x` alpha track
