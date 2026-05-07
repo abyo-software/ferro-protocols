@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: Apache-2.0
+name: Cross-OS Test (weekly)
+
+# Linux is the canonical target — the KVM `cargo test` job in ci.yml gates
+# every PR. macOS / Windows tests catch the rare platform-specific bug
+# (path separators, signal handling, file-locking semantics) and run on a
+# weekly schedule instead of every PR to free runner pool capacity.
+on:
+  schedule:
+    # 02:11 UTC every Sunday — off-peak vs PR CI and nightly fuzz (03:17).
+    - cron: "11 2 * * 0"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: cross-os-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: cargo test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.91.1
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --all-features

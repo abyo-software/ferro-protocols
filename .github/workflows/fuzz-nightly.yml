@@ -28,8 +28,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
-      - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
       - name: Run all fuzz targets
         env:
           TOTAL_TIME: ${{ github.event.inputs.total_time_seconds || '300' }}

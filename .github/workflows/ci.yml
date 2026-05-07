@@ -17,20 +17,26 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-jobs:
-  check:
-    name: cargo check
-    runs-on: [self-hosted, Linux, X64, kvm]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.91.1
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo check --workspace --all-targets
+# Job sizing rationale (Wave 13 CI capacity reduction):
+#   * Self-hosted KVM runner pool is the bottleneck across the
+#     ferro-* org — 13 repos x N PRs all share it. Total per-PR
+#     KVM-job count is the headline metric, NOT per-job wall time.
+#     Local profile on a 12 vCPU host shows the entire test suite
+#     runs in ~9s of wall time after build; cargo check is ~24s
+#     cold, ~2s warm with Swatinem cache.
+#   * `cargo check` is folded into `clippy` (clippy is a superset).
+#   * Cross-OS test matrix moved to `.github/workflows/cross-os.yml`
+#     (weekly cron) — Linux KVM is the canonical target, ubuntu /
+#     macos / windows are sanity checks that don't need to gate
+#     every PR.
+#   * `cargo install <tool>` replaced with `taiki-e/install-action`
+#     which fetches a prebuilt binary (saves ~60-180s per job vs
+#     building cargo-audit / cargo-deny from source).
+#   * Coverage is push-on-main only (see coverage.yml).
 
+jobs:
   clippy:
+    # Supersedes a separate `cargo check` job — clippy implies check.
     name: clippy (-D warnings)
     runs-on: [self-hosted, Linux, X64, kvm]
     steps:
@@ -54,12 +60,8 @@ jobs:
       - run: cargo fmt --all -- --check
 
   test:
-    name: cargo test
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+    name: cargo test (KVM)
+    runs-on: [self-hosted, Linux, X64, kvm]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -100,8 +102,9 @@ jobs:
         with:
           toolchain: 1.91.1
       - uses: Swatinem/rust-cache@v2
-      - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
       - run: cargo audit --deny warnings
 
   docs:

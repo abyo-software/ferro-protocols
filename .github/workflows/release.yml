@@ -19,6 +19,9 @@ jobs:
         with:
           toolchain: 1.91.1
       - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
 
       - name: Parse tag → crate, version
         id: tag
@@ -59,7 +62,6 @@ jobs:
           cargo fmt --all -- --check
           cargo clippy --workspace --all-targets --all-features -- -D warnings
           cargo test --workspace --all-features
-          cargo install cargo-deny --locked
           cargo deny --all-features check
 
       - name: cargo publish (dry-run)
