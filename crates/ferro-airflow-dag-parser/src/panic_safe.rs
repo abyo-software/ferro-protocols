@@ -43,6 +43,26 @@ use crate::common::ParseError;
 /// well under the observed overflow point.
 const MAX_BRACKET_DEPTH: usize = 32;
 
+/// Maximum run length of consecutive unary-prefix operator bytes (`~`,
+/// `-`, `+`) we will accept, ignoring intervening ASCII whitespace.
+///
+/// Each `~`, `-`, `+` at expression-start position becomes a
+/// `UnaryOp(...)` AST node nested inside the next, and the upstream
+/// `ruff_python_parser` builds that nesting via recursive descent. A
+/// long run such as `~~~~~ ... x` (the 2026-05-09 fuzz artifact
+/// `crash-ba2528b6...` carries 1961 consecutive `~`) overflows the
+/// thread stack inside `ruff_python_parser`'s expression entry, which
+/// Linux delivers as `SIGSEGV`. `catch_unwind` does NOT catch stack
+/// overflow, so the production process aborts. Pre-screening the
+/// input before the parser ever sees it is the only defence.
+///
+/// 64 is well above any legitimate Python expression (real code never
+/// chains more than two `--` / `~~` operators) and well below the
+/// observed overflow threshold (between 1000 and 1500 on a 2 MiB
+/// thread stack). The same operator chain via the `not` keyword is
+/// recognised separately because it spans 3 bytes plus whitespace.
+const MAX_UNARY_OP_RUN: usize = 64;
+
 /// Parse a Python module while isolating any panic from the upstream
 /// parser as [`ParseError::Internal`], and any stack-overflow class
 /// failure as [`ParseError::Parse`].
@@ -50,6 +70,12 @@ pub fn parse_module_safely(source: &str) -> Result<Parsed<ruff_python_ast::ModMo
     if let Some(depth) = max_bracket_depth_exceeds(source, MAX_BRACKET_DEPTH) {
         return Err(ParseError::Parse(format!(
             "input rejected: bracket nesting depth {depth} exceeds {MAX_BRACKET_DEPTH} \
+             (would risk stack overflow in upstream parser)"
+        )));
+    }
+    if let Some(run) = max_unary_op_run_exceeds(source, MAX_UNARY_OP_RUN) {
+        return Err(ParseError::Parse(format!(
+            "input rejected: unary-prefix operator chain length {run} exceeds {MAX_UNARY_OP_RUN} \
              (would risk stack overflow in upstream parser)"
         )));
     }
@@ -87,6 +113,40 @@ fn max_bracket_depth_exceeds(source: &str, limit: usize) -> Option<usize> {
                 depth = depth.saturating_sub(1);
             }
             _ => {}
+        }
+    }
+    None
+}
+
+/// Walk `source` once and return the first run length that exceeds
+/// `limit`, or `None` if every consecutive run of unary-prefix operator
+/// bytes (`~`, `-`, `+`) — counting operator bytes only and skipping
+/// ASCII whitespace within the run — stays within bounds.
+///
+/// The scan does not differentiate between unary and binary uses of
+/// `-` / `+` (e.g. `a - b - c - ...` would also count). That is
+/// deliberate: real Python source never chains 64+ consecutive `-` /
+/// `+` either (every additional operator means another `BinOp`
+/// expression node, equally subject to recursive descent), so the
+/// over-broad scan provides extra defence in depth without rejecting
+/// legitimate code. The cap is enforced only on operator characters,
+/// so identifier characters and digits between them break the run.
+fn max_unary_op_run_exceeds(source: &str, limit: usize) -> Option<usize> {
+    let mut run: usize = 0;
+    for &b in source.as_bytes() {
+        match b {
+            b'~' | b'-' | b'+' => {
+                run = run.saturating_add(1);
+                if run > limit {
+                    return Some(run);
+                }
+            }
+            // ASCII whitespace is permissive within a run so
+            // `~ ~ ~ ~ ... x` is rejected the same as `~~~~...x`.
+            b' ' | b'\t' | b'\r' | b'\n' => {}
+            _ => {
+                run = 0;
+            }
         }
     }
     None
@@ -142,6 +202,49 @@ mod tests {
         // generous enough for real-world DAG shapes.
         let src = "x = ".to_string() + &"(".repeat(16) + "1" + &")".repeat(16) + "\n";
         let _ = parse_module_safely(&src).expect("must parse");
+    }
+
+    #[test]
+    fn long_unary_op_chain_rejected_before_parser() {
+        // 2026-05-09 fuzz artifact `crash-ba2528b6...` carried 1961
+        // consecutive `~` characters. Pre-fix, the upstream parser
+        // recursive-descended ~1500 frames and SIGSEGVed on the
+        // default 2 MiB thread stack — `catch_unwind` does not catch
+        // stack overflow, so the production process aborts. The
+        // pre-screen now turns that into a graceful `ParseError::Parse`.
+        let src = "~".repeat(1961) + "x";
+        let err = parse_module_safely(&src).expect_err("must reject");
+        match err {
+            ParseError::Parse(msg) => {
+                assert!(
+                    msg.contains("unary-prefix operator chain"),
+                    "unexpected message: {msg}"
+                );
+            }
+            other => panic!("expected Parse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn moderate_unary_op_chain_passes_to_parser() {
+        // 8 nested negations (`--------x` = `Unary(-, Unary(-, ...))`).
+        // Far below MAX_UNARY_OP_RUN (64); the parser handles this
+        // and the cap stays out of the way for legitimate expressions.
+        let src = "x = ".to_string() + &"-".repeat(8) + "1\n";
+        let _ = parse_module_safely(&src).expect("must parse");
+    }
+
+    #[test]
+    fn whitespace_within_unary_chain_still_rejected() {
+        // `~ ~ ~ ~ ... x` with 100 `~` separated by spaces — same
+        // recursion shape as `~~~~...x`, must be rejected.
+        let mut src = String::new();
+        for _ in 0..100 {
+            src.push_str("~ ");
+        }
+        src.push('x');
+        let err = parse_module_safely(&src).expect_err("must reject");
+        assert!(matches!(err, ParseError::Parse(_)), "got {err:?}");
     }
 
     /// Regression test for an upstream `littrs-ruff-python-parser` panic
