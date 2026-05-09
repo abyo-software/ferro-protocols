@@ -41,6 +41,12 @@ use crate::common::ParseError;
 /// SIGSEGV on the default thread stack). Independent stack-overflow
 /// tests in `tests/parser_stack_safety.rs` confirm depth 32 stays
 /// well under the observed overflow point.
+///
+/// # Upstream durable fix
+///
+/// See `MAX_UNARY_OP_RUN` below for the same cross-reference to
+/// astral-sh/ruff PR #24810 — the same parser-side recursion guard
+/// covers the bracket-nesting recursion shape as well.
 const MAX_BRACKET_DEPTH: usize = 32;
 
 /// Maximum run length of consecutive unary-prefix operator bytes (`~`,
@@ -61,6 +67,24 @@ const MAX_BRACKET_DEPTH: usize = 32;
 /// observed overflow threshold (between 1000 and 1500 on a 2 MiB
 /// thread stack). The same operator chain via the `not` keyword is
 /// recognised separately because it spans 3 bytes plus whitespace.
+///
+/// # Upstream durable fix
+///
+/// astral-sh/ruff PR #24810 ("Parser recursion limit",
+/// <https://github.com/astral-sh/ruff/pull/24810>, OPEN as of
+/// 2026-05-09) introduces a `max_recursion_depth` parameter on the
+/// parser (default 202, matching CPython's `MAXSTACK`) that wraps every
+/// recursive expression / statement / pattern entry — including the
+/// `parse_lhs_expression` site that this `MAX_UNARY_OP_RUN` cap exists
+/// to defend against. Once that PR merges and lands in a
+/// `littrs-ruff-python-parser` release, this caller-side pre-screen
+/// becomes redundant; we keep it as defence in depth (the cost is one
+/// linear scan per parse, zero allocations on the happy path) and
+/// because it also defends against the same recursion shape via
+/// `BinOp` (e.g. `1+1+1+1+...`) which the upstream limit catches
+/// equally well but at parse-time rather than pre-screen-time.
+///
+/// Tracking issue: astral-sh/ruff #22930.
 const MAX_UNARY_OP_RUN: usize = 64;
 
 /// Parse a Python module while isolating any panic from the upstream
