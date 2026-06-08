@@ -552,7 +552,7 @@ mod tests {
     use serde_json::json;
     use tokio::sync::RwLock;
 
-    use super::{derive_index_path, handle_publish, mutate_owners, set_yanked};
+    use super::{derive_index_path, handle_publish, mutate_owners, rollback_publish, set_yanked};
     use crate::config::IndexConfig;
     use crate::index::IndexEntry;
     use crate::name::{canonical_name, index_path};
@@ -829,6 +829,121 @@ mod tests {
         assert!(
             !state.blobs.contains(&digest).await.unwrap(),
             "an orphan blob must be deleted by the rollback"
+        );
+    }
+
+    /// R3-2: `rollback_publish` drops the crate record only when the rolled-
+    /// back publish leaves it *completely* empty — no entries, no tarballs,
+    /// **and** no owners. A record that still carries a sibling version after
+    /// the one rolled-back version is removed must be **kept**.
+    ///
+    /// This pins the first `&&` in the empties-check (`entries.is_empty() &&
+    /// ...`): here `entries` is **non-empty** after the rollback (a sibling
+    /// `1.0.0` survives), while `tarballs` and `owners` are empty. The `&&`
+    /// form yields `false` → keep; an `||` mutant would yield `true` → wrongly
+    /// remove the whole crate, dropping the surviving `1.0.0`.
+    #[test]
+    fn rollback_publish_keeps_record_with_surviving_sibling_version() {
+        let key = canonical_name("foo");
+        let digest = Digest::sha256_of(b"v2-bytes");
+
+        // Record as it would look mid-publish of 2.0.0: a surviving 1.0.0
+        // entry plus the just-appended 2.0.0 entry + tarball mapping. No
+        // tarball mapping for 1.0.0 and no owners, so after 2.0.0 is rolled
+        // back only `entries` (the 1.0.0 line) is non-empty.
+        let record = CrateRecord {
+            entries: vec![seed_entry("1.0.0", false), seed_entry("2.0.0", false)],
+            tarballs: {
+                let mut t = BTreeMap::new();
+                t.insert("2.0.0".to_owned(), digest.clone());
+                t
+            },
+            owners: vec![],
+        };
+        let mut crates = BTreeMap::new();
+        crates.insert(key.clone(), record);
+
+        rollback_publish(&mut crates, &key, "2.0.0", &digest);
+
+        let got = crates
+            .get(&key)
+            .expect("record with a surviving sibling version must be kept");
+        assert_eq!(got.entries.len(), 1, "only the rolled-back 2.0.0 removed");
+        assert_eq!(got.entries[0].vers, "1.0.0", "sibling 1.0.0 survives");
+        assert!(
+            !got.tarballs.contains_key("2.0.0"),
+            "2.0.0 tarball mapping removed in rollback"
+        );
+    }
+
+    /// R3-2: companion pinning the **second** `&&` in the empties-check
+    /// (`... && tarballs.is_empty() && owners.is_empty()`). Here after the
+    /// rollback `entries` is empty and `tarballs` is empty, but `owners` is
+    /// **non-empty**. `(entries.is_empty() && tarballs.is_empty())` is `true`,
+    /// so the final `&& owners.is_empty()` decides: `&&` → `false` (keep the
+    /// owner list), an `||` mutant → `true` (wrongly drop the crate and its
+    /// owners).
+    #[test]
+    fn rollback_publish_keeps_record_with_surviving_owners() {
+        let key = canonical_name("foo");
+        let digest = Digest::sha256_of(b"only-version-bytes");
+
+        // Mid-publish of the crate's *only* version 1.0.0, but the crate
+        // already carried an owner (e.g. a prior owner-add). Rolling back
+        // 1.0.0 empties entries + tarballs but the owner list remains.
+        let record = CrateRecord {
+            entries: vec![seed_entry("1.0.0", false)],
+            tarballs: {
+                let mut t = BTreeMap::new();
+                t.insert("1.0.0".to_owned(), digest.clone());
+                t
+            },
+            owners: vec![Owner {
+                id: 7,
+                login: "alice".into(),
+                name: None,
+            }],
+        };
+        let mut crates = BTreeMap::new();
+        crates.insert(key.clone(), record);
+
+        rollback_publish(&mut crates, &key, "1.0.0", &digest);
+
+        let got = crates
+            .get(&key)
+            .expect("record with surviving owners must be kept, not dropped");
+        assert!(got.entries.is_empty(), "the only version was rolled back");
+        assert!(got.tarballs.is_empty(), "its tarball mapping was removed");
+        assert_eq!(got.owners.len(), 1, "owner list survives the rollback");
+        assert_eq!(got.owners[0].login, "alice");
+    }
+
+    /// R3-2 baseline: when the rollback empties **all three** fields (the
+    /// publish that created a brand-new crate with no owners), the record is
+    /// removed. This is the `true && true && true` arm — it keeps the two
+    /// `&&`-pinning tests above honest by proving the remove branch is real.
+    #[test]
+    fn rollback_publish_removes_fully_emptied_record() {
+        let key = canonical_name("foo");
+        let digest = Digest::sha256_of(b"fresh-crate-bytes");
+
+        let record = CrateRecord {
+            entries: vec![seed_entry("1.0.0", false)],
+            tarballs: {
+                let mut t = BTreeMap::new();
+                t.insert("1.0.0".to_owned(), digest.clone());
+                t
+            },
+            owners: vec![],
+        };
+        let mut crates = BTreeMap::new();
+        crates.insert(key.clone(), record);
+
+        rollback_publish(&mut crates, &key, "1.0.0", &digest);
+
+        assert!(
+            !crates.contains_key(&key),
+            "a fully-emptied fresh crate record is removed"
         );
     }
 }

@@ -302,10 +302,113 @@ mod tests {
         }
     }
 
+    /// A `tracing` writer that appends every emitted byte into a shared
+    /// buffer, so a test can inspect *which* log line a code path produced.
+    /// Used to distinguish the two empty-returning arms of [`load`] (the
+    /// silent "no snapshot" debug vs the "failed to read" warn), which are
+    /// otherwise observationally identical through the return value.
+    #[derive(Clone)]
+    struct CaptureWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
+        type Writer = Self;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Run `f` with a thread-local tracing subscriber capturing at DEBUG
+    /// level, returning everything it logged as a `String`. Synchronous
+    /// (`with_default` on the current thread) so it cannot race a neighbour
+    /// test's global subscriber.
+    fn capture_logs(f: impl FnOnce()) -> String {
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_ansi(false)
+            .with_writer(CaptureWriter(buf.clone()))
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        let bytes = buf.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
+    }
+
     #[test]
     fn missing_snapshot_loads_empty() {
         let tmp = tempfile::TempDir::new().unwrap();
         assert!(load(tmp.path()).is_empty());
+    }
+
+    /// R3: an **absent** snapshot file (the `ErrorKind::NotFound` arm of the
+    /// `std::fs::read` match) loads empty *silently* — it logs the debug
+    /// "no index snapshot; starting empty" line and **not** the warn
+    /// "failed to read" line.
+    ///
+    /// This pins the `NotFound` match guard at `load` (`if err.kind() ==
+    /// ErrorKind::NotFound`). A guard forced to `false`, or `==` flipped to
+    /// `!=`, would route an absent file through the *other* arm and emit the
+    /// "failed to read index snapshot" warn instead.
+    #[test]
+    fn absent_snapshot_takes_notfound_arm_silently() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // No state file exists → read() fails with NotFound.
+        let logs = capture_logs(|| {
+            assert!(load(tmp.path()).is_empty());
+        });
+        assert!(
+            logs.contains("no index snapshot; starting empty"),
+            "absent snapshot must hit the NotFound (debug) arm; got: {logs}"
+        );
+        assert!(
+            !logs.contains("failed to read index snapshot"),
+            "absent snapshot must NOT hit the generic-IO-error (warn) arm; got: {logs}"
+        );
+    }
+
+    /// R3 companion: a snapshot **path that is unreadable for a non-NotFound
+    /// reason** (here it is a *directory*, so `std::fs::read` fails with a
+    /// non-`NotFound` kind) loads empty via the *other* arm — it logs the
+    /// "failed to read index snapshot" warn and **not** the `NotFound` debug.
+    ///
+    /// Together with [`absent_snapshot_takes_notfound_arm_silently`] this
+    /// pins both branches of the `err.kind() == ErrorKind::NotFound` guard:
+    /// a guard forced to `true` would route this present-but-unreadable case
+    /// through the `NotFound` (silent debug) arm instead of the warn arm.
+    #[test]
+    fn unreadable_snapshot_takes_non_notfound_arm() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // Make the snapshot *path* a directory: reading it fails with a
+        // non-NotFound error (e.g. IsADirectory), so the match falls through
+        // to the generic `Err(err)` warn arm.
+        std::fs::create_dir(state_path(tmp.path())).unwrap();
+        let read_err_kind = std::fs::read(state_path(tmp.path())).unwrap_err().kind();
+        assert_ne!(
+            read_err_kind,
+            std::io::ErrorKind::NotFound,
+            "precondition: a directory read must be a non-NotFound error"
+        );
+
+        let logs = capture_logs(|| {
+            assert!(load(tmp.path()).is_empty());
+        });
+        assert!(
+            logs.contains("failed to read index snapshot"),
+            "an unreadable (non-NotFound) snapshot must hit the warn arm; got: {logs}"
+        );
+        assert!(
+            !logs.contains("no index snapshot; starting empty"),
+            "an unreadable snapshot must NOT hit the silent NotFound arm; got: {logs}"
+        );
     }
 
     #[test]
