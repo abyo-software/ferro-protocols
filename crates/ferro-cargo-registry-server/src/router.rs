@@ -20,6 +20,7 @@
 //! `mount()` wires the directory here.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::Router;
@@ -70,16 +71,72 @@ pub struct CargoState {
     pub crates: Arc<RwLock<BTreeMap<String, CrateRecord>>>,
     /// Index configuration (returned from `/config.json`).
     pub config: Arc<IndexConfig>,
+    /// Data directory used for durable index persistence (DD R2-6).
+    ///
+    /// `None` means the index map is ephemeral (the in-process / unit-test
+    /// path); `Some(dir)` enables write-through mirroring of the index map
+    /// to `index-state.json` under `dir` on every mutation, and loading it
+    /// on construction via [`with_persistence`](Self::with_persistence).
+    pub data_dir: Option<Arc<PathBuf>>,
 }
 
 impl CargoState {
-    /// Build new state backed by `blobs` and the given `api_host`.
+    /// Build new **ephemeral** state backed by `blobs` and the given
+    /// `api_host`.
+    ///
+    /// The index map is held in memory only; no durable snapshot is
+    /// written or read. Use [`with_persistence`](Self::with_persistence)
+    /// for the filesystem-backed deployment that must survive restarts.
     #[must_use]
     pub fn new(blobs: Arc<dyn BlobStore>, api_host: impl Into<String>) -> Self {
         Self {
             blobs,
             crates: Arc::new(RwLock::new(BTreeMap::new())),
             config: Arc::new(IndexConfig::new(api_host)),
+            data_dir: None,
+        }
+    }
+
+    /// Build durable state: load any existing index snapshot from
+    /// `data_dir` and enable write-through persistence on every mutation
+    /// (DD R2-6).
+    ///
+    /// A missing or corrupt snapshot starts empty (logged), so this never
+    /// fails to construct on a damaged state file.
+    #[must_use]
+    pub fn with_persistence(
+        blobs: Arc<dyn BlobStore>,
+        api_host: impl Into<String>,
+        data_dir: PathBuf,
+    ) -> Self {
+        let crates = crate::persist::load(&data_dir);
+        Self {
+            blobs,
+            crates: Arc::new(RwLock::new(crates)),
+            config: Arc::new(IndexConfig::new(api_host)),
+            data_dir: Some(Arc::new(data_dir)),
+        }
+    }
+
+    /// Mirror the in-memory index map to the durable snapshot, if
+    /// persistence is enabled.
+    ///
+    /// Call this while holding a read or write guard on
+    /// [`crates`](Self::crates) so the snapshot is consistent with the map
+    /// that produced it. A write failure is logged and swallowed — a
+    /// failed durable mirror must not fail the originating request, and
+    /// the in-memory state remains authoritative until the next
+    /// successful save or a restart.
+    pub fn persist_locked(&self, crates: &BTreeMap<String, CrateRecord>) {
+        let Some(dir) = &self.data_dir else {
+            return;
+        };
+        if let Err(err) = crate::persist::save(dir, crates) {
+            tracing::error!(
+                data_dir = %dir.display(),
+                %err,
+                "failed to persist index snapshot; in-memory state is still authoritative"
+            );
         }
     }
 }

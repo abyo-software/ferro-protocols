@@ -257,6 +257,9 @@ pub async fn handle_publish(
     let record = crates.entry(key).or_insert_with(CrateRecord::default);
     record.tarballs.insert(entry.vers.clone(), digest.clone());
     record.entries.push(entry);
+    // R2-6: write the index map through to the durable snapshot while the
+    // lock is held so on-disk state matches memory.
+    state.persist_locked(&crates);
     drop(crates);
 
     debug!(crate_name = %name, version = %vers, "publish complete");
@@ -339,6 +342,8 @@ async fn set_yanked(
         .find(|e| e.vers == version)
         .ok_or_else(|| CargoError::NotFound(format!("{name} {version}")))?;
     entry.yanked = yanked;
+    // R2-6: yank / unyank mutate an existing index line; mirror it.
+    state.persist_locked(&crates);
     drop(crates);
     Ok(())
 }
@@ -422,6 +427,8 @@ async fn mutate_owners(
             next_id += 1;
         }
     }
+    // R2-6: owner changes are durable index state; mirror them.
+    state.persist_locked(&crates);
     drop(crates);
     Ok(())
 }

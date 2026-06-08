@@ -133,12 +133,18 @@ impl Config {
 
 /// Build the [`CargoState`] for a filesystem-backed registry.
 ///
-/// Creates the data directory if it does not yet exist.
+/// Creates the data directory if it does not yet exist, then enables
+/// durable index persistence (DD R2-6): any existing `index-state.json`
+/// snapshot is loaded, and every subsequent publish / yank / owner change
+/// is written through to it. A restart therefore re-serves every
+/// previously published crate, version, `yanked` flag, and owner — not
+/// just the tarballs the blob store already kept.
 ///
 /// # Errors
 ///
 /// Returns an error when the data directory cannot be created or the
-/// blob store cannot be opened.
+/// blob store cannot be opened. A missing or corrupt snapshot is **not**
+/// an error: it starts the index empty (logged).
 pub fn build_state(
     data_dir: &Path,
     api_host: impl Into<String>,
@@ -146,7 +152,11 @@ pub fn build_state(
     std::fs::create_dir_all(data_dir)
         .map_err(|e| format!("create data dir {}: {e}", data_dir.display()))?;
     let store = Arc::new(FsBlobStore::new(data_dir)?);
-    Ok(CargoState::new(store, api_host))
+    Ok(CargoState::with_persistence(
+        store,
+        api_host,
+        data_dir.to_path_buf(),
+    ))
 }
 
 /// Assemble the full application router: protocol surface + Kubernetes

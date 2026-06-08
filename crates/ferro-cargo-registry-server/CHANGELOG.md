@@ -9,6 +9,37 @@ releases. Breaking changes will be released as a separate `v0.2.0`.
 ## [Unreleased]
 
 ### Added
+- **Durable index persistence (DD R2-6).** The filesystem-backed binary
+  now mirrors the in-memory crate index (versions, `cksum`s, `yanked`
+  flags, owners) to an `index-state.json` snapshot in the data directory.
+  The snapshot is written through on every publish / yank / unyank /
+  owner change and loaded on boot, so a restart re-serves every
+  previously published crate — not just the tarballs the blob store
+  already kept. A missing or corrupt snapshot starts the index empty
+  (logged) and never blocks boot. The version → tarball digest map is
+  rebuilt from each entry's `cksum`, so it is not duplicated in the
+  snapshot. `CargoState::with_persistence` enables it; `CargoState::new`
+  stays ephemeral for in-process / unit-test use.
+
+### Fixed
+- **Published versions are immutable (DD R2-5).** Re-publishing an
+  existing `(name, version)` is now rejected with `409 Conflict`
+  (`DuplicateVersion`); the original tarball and index `cksum` are left
+  untouched. Only yank / unyank may mutate an existing index line.
+- **Validate before writing the tarball (DD R2-8).** The publish handler
+  now runs the name-collision and duplicate-version checks *before*
+  storing the `.crate` blob, so a rejected publish no longer leaves an
+  orphan blob on disk.
+- **No wildcard origin in `config.json` (DD R2-9).** When the listen host
+  is a wildcard (`0.0.0.0` / `::`) or port `0` and no explicit
+  `FERRO_CARGO_REGISTRY_API` is set, the binary now refuses to boot
+  rather than advertising an unfetchable `http://0.0.0.0:8081` origin.
+- **`/metrics` scrapes are self-instrumented (DD R2-3).** The `/metrics`
+  route is merged before the tracking middleware is layered, so a scrape
+  is counted under `handler="metrics"` (the docs already claimed every
+  request is recorded).
+
+### Added (earlier)
 - **Prometheus `/metrics` endpoint + request instrumentation.** New
   `metrics` module exposes a `GET /metrics` route (Prometheus text
   exposition format) and a tower/axum middleware that records, by

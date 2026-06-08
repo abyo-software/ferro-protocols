@@ -110,6 +110,16 @@ and prints a message naming `FERRO_CARGO_REGISTRY_API`. A concrete
 non-wildcard listen (for example `127.0.0.1:8081`) derives a usable
 `http://<addr>` origin automatically.
 
+The filesystem-backed binary persists the crate index durably: tarballs
+live in the content-addressed blob store under `<data>/sha256/`, and the
+per-crate index state (versions, `cksum`s, `yanked` flags, owners) is
+mirrored to `<data>/index-state.json`, written through on every publish /
+yank / owner change and loaded on boot. A restart therefore re-serves
+every previously published crate. A missing or corrupt snapshot starts
+the index empty (logged) and never blocks startup. (The in-process
+library `CargoState::new` is ephemeral; `CargoState::with_persistence`
+opts into the durable path.)
+
 The binary mounts Kubernetes-style probes alongside the protocol
 routes: `GET /live`, `GET /ready`, and `GET /healthz`
 (`{"status":"ok"}`). Shutdown is graceful on `SIGTERM` / Ctrl-C.

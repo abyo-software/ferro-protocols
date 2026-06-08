@@ -6,7 +6,7 @@ use std::sync::Arc;
 use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode, header};
 use ferro_blob_store::FsBlobStore;
-use ferro_cargo_registry_server::{CargoState, encode_publish_body, router};
+use ferro_cargo_registry_server::{CargoState, build_state, encode_publish_body, router};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use tempfile::TempDir;
@@ -695,6 +695,118 @@ async fn rejected_duplicate_publish_leaves_no_orphan_blob() {
         after_first,
         "a rejected duplicate publish must not leave an orphan blob"
     );
+}
+
+/// R2-6 regression: durable index persistence survives a restart.
+///
+/// Build a filesystem-backed state on a temp dir, publish + yank a
+/// crate, then DROP the state and rebuild a fresh state/app from the
+/// SAME directory (simulating a process restart). The crate, its
+/// version, its `yanked` flag, its owner, and the downloadable tarball
+/// must all still be served — proving the index map (not just the
+/// blobs) is durable.
+#[tokio::test]
+async fn index_state_survives_simulated_restart() {
+    let tmp = TempDir::new().expect("tempdir");
+    let dir = tmp.path().to_path_buf();
+
+    // ---- First "process": publish foo 1.0.0, yank it, add an owner. ----
+    {
+        let state = build_state(&dir, "http://localhost").expect("state");
+        let app = router(state);
+
+        let resp = send(
+            &app,
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/api/v1/crates/new")
+                .body(Body::from(publish_body("foo", "1.0.0", b"durable-bytes")))
+                .expect("build"),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = send(
+            &app,
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/api/v1/crates/foo/1.0.0/yank")
+                .body(Body::empty())
+                .expect("build"),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = send(
+            &app,
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/api/v1/crates/foo/owners")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({"users": ["alice"]})).unwrap(),
+                ))
+                .expect("build"),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        // `app`/`state` dropped here — the in-memory map is gone.
+    }
+
+    // ---- Second "process": rebuild from the SAME data dir. ----
+    let state = build_state(&dir, "http://localhost").expect("state reload");
+    let app = router(state);
+
+    // Sparse index still lists foo 1.0.0 with yanked: true.
+    let resp = send(
+        &app,
+        Request::builder()
+            .method(Method::GET)
+            .uri("/index/3/f/foo")
+            .body(Body::empty())
+            .expect("build"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK, "index line must survive restart");
+    let body = to_bytes(resp.into_body(), 4096).await.expect("body");
+    let v: Value = serde_json::from_str(
+        std::str::from_utf8(&body).unwrap().lines().next().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(v["name"], "foo");
+    assert_eq!(v["vers"], "1.0.0");
+    assert_eq!(v["yanked"], true, "yanked flag must survive restart");
+
+    // Owner list survives.
+    let resp = send(
+        &app,
+        Request::builder()
+            .method(Method::GET)
+            .uri("/api/v1/crates/foo/owners")
+            .body(Body::empty())
+            .expect("build"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), 4096).await.expect("body");
+    let v: Value = serde_json::from_slice(&body).unwrap();
+    let users = v["users"].as_array().unwrap();
+    assert_eq!(users.len(), 1);
+    assert_eq!(users[0]["login"], "alice", "owner must survive restart");
+
+    // Download still serves the original tarball (digest rebuilt from cksum).
+    let resp = send(
+        &app,
+        Request::builder()
+            .method(Method::GET)
+            .uri("/api/v1/crates/foo/1.0.0/download")
+            .body(Body::empty())
+            .expect("build"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK, "download must survive restart");
+    let got = to_bytes(resp.into_body(), 4096).await.expect("body");
+    assert_eq!(got.as_ref(), b"durable-bytes");
 }
 
 /// R2-8 regression: a publish rejected by the name-collision check

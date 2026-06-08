@@ -70,6 +70,7 @@ pub mod index;
 pub mod metrics;
 pub mod name;
 pub mod owners;
+pub mod persist;
 pub mod publish;
 pub mod router;
 pub mod serve;
