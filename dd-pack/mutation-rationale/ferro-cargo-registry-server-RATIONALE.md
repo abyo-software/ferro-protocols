@@ -1,6 +1,47 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # ferro-cargo-registry-server mutation-kill rationale
 
+## Wave 3 (write-atomic-durable `AlreadyExists` retry guard)
+
+Baseline before this wave: **94.6% kill** (9 missed, per the orchestrator's
+`cargo mutants` re-run). This wave targets the three remaining **killable**
+mutants on the `err.kind() == ErrorKind::AlreadyExists` retry guard at
+`persist.rs:245` in `write_atomic_durable`. Wave-2 row **A** (and the
+implicit `==`/`false` siblings) had classified the `245` guard as
+retry-loop-equivalent on the premise that "only the iteration count differs,
+which is unobservable." That premise was **wrong**: the iteration count *is*
+observable through the process-global `SAVE_SEQ` counter (one `fetch_add` per
+`create_new` attempt), and the `false`/`!=` forms additionally flip a
+collision from *retry-and-succeed* to *fail*. All three are now killed.
+
+Scope: **tests only** (two tests in `persist.rs`'s `#[cfg(test)]` module);
+no library logic changed.
+
+### Wave-3 mutant → killing test map (3 killed)
+
+| # | Mutant (file:line) | Replacement | Killing test | Why it kills |
+|---|--------------------|-------------|--------------|--------------|
+| W6 | `persist.rs:245:25` `write_atomic_durable` `AlreadyExists` guard | `false` | `persist::tests::save_handles_create_new_temp_collision` | The test squats a contiguous *block* of candidate temp names so the save's first `create_new` provably hits `AlreadyExists`. The real guard records `last_err` and retries past the block → `save` **succeeds**. Guard forced `false` returns the first `AlreadyExists` immediately → `save` fails → the test's `.expect()` panics. The experiment retries until a genuine collision is observed (`SAVE_SEQ` advanced past the block), so it cannot pass vacuously. |
+| W7 | `persist.rs:245:36` `write_atomic_durable` guard `==` | `!=` | `save_handles_create_new_temp_collision` (collision side) + `save_propagates_non_already_exists_create_error` (propagate side) | On a collision, `!=` routes `AlreadyExists` to the immediate-`return Err` arm → `save` **fails** (killed by the collision test). On a non-`AlreadyExists` (`NotFound`) error, `!=` instead routes it into the retry loop, burning the full 16 attempts (killed by the propagate test's `SAVE_SEQ`-consumption bound). Inverted in both directions. |
+| W8 | `persist.rs:245:25` `write_atomic_durable` `AlreadyExists` guard | `true` | `persist::tests::save_propagates_non_already_exists_create_error` | A `create_new` failure that is **not** `AlreadyExists` (here `NotFound`, because the data-dir parent is absent) must be propagated after **one** attempt. The test saves into a missing dir, asserts the returned error kind is `NotFound`, and measures how many `SAVE_SEQ` values the failing save consumed. The real guard consumes **1**; guard forced `true` folds `NotFound` into the retry arm and burns the full **16**. `SAVE_SEQ` is process-global, so the test takes the **minimum** consumption across several trials — the real guard can dip to 1, but the mutant consumes ≥16 on *every* trial, so `min < 16` can only come from the real (propagate-after-one) guard. |
+
+These supersede Wave-2 row **A**: the `245` guard is **no longer
+by-design**. The remaining 6 by-design entries (rows B–H minus A) stand:
+the best-effort directory fsync (`267` body + the three `273` `InvalidInput`
+variants) and the three lifecycle/tracing entry points (`init_tracing`,
+`shutdown_signal`, binary `main`).
+
+### Wave-3 expected outcome
+
+- Newly killed: **3** (`245:25→true`, `245:25→false`, `245:36 ==→!=`).
+- Remaining by-design un-killable: **6** (`267` + three `273` directory-fsync
+  variants, `init_tracing`, `shutdown_signal`, binary `main`).
+- Projected kill rate: from **94.6%** (159/168) to **≥ 96.4%** (162/168),
+  clearing the 95% target. The orchestrator's `cargo mutants` re-run is the
+  authority.
+
+---
+
 ## Wave 2 (R3/R4 persistence + rollback)
 
 Baseline before this wave: **92.3% kill (13 missed of 168 viable)**.
@@ -41,7 +82,7 @@ tests are at risk, and these load tests are synchronous.
 
 | # | Mutant (file:line) | Replacement | Category | Why no test |
 |---|--------------------|-------------|----------|-------------|
-| A | `persist.rs:245:25` `write_atomic_durable` match-guard `err.kind()==AlreadyExists` → `true` | `true` | retry-loop equivalent | The guard decides whether an `open` error is treated as an `O_EXCL` temp-name collision (record in `last_err`, retry the loop) or returned immediately. Forcing it `true` routes a **non-`AlreadyExists`** error (e.g. `NotADirectory` when the data dir is invalid) into the retry arm — but that arm stores the same error in `last_err`, the loop exhausts, and `Err(last_err)` returns the **same error kind**. The real `AlreadyExists` retry-success path is already pinned by `save_handles_create_new_temp_collision`. There is no constructible input where `true` vs the real guard yields a different return value (success/failure or error kind); only the iteration count differs, which is unobservable. |
+| A | `persist.rs:245:25` `write_atomic_durable` match-guard `err.kind()==AlreadyExists` → `true` | `true` | ~~retry-loop equivalent~~ **SUPERSEDED → killed in Wave 3 (W8)** | *Original (incorrect) classification:* "only the iteration count differs, which is unobservable." This was wrong — the iteration count is observable via the process-global `SAVE_SEQ` (one `fetch_add` per attempt), and the `false`/`!=` siblings additionally flip a collision from succeed to fail. All three `245` mutants are now killed; see **Wave 3** (W6/W7/W8) above. |
 | B | `persist.rs:267:5` `sync_parent_dir` → `Ok(())` | no-op body | best-effort fsync | The function fsyncs the *parent directory* so a preceding `rename` is crash-durable. Its success/failure is invisible to any in-process observer: the file bytes were already `sync_all`-ed and the directory entry already exists in the live filesystem. Replacing the body with `Ok(())` removes only the crash-durability fsync, which cannot be observed without an actual power-loss/crash harness (out of scope, and indistinguishable from a normal successful `save`). |
 | C | `persist.rs:273:25` `sync_parent_dir` `InvalidInput` guard → `true` | `true` | best-effort fsync | The guard tolerates an `InvalidInput` from `dir.sync_all()` (platforms that reject fsync on a directory handle) by returning `Ok(())` instead of propagating. On Linux a directory `sync_all` **succeeds**, so this arm is never reached in practice; the success return is identical whether the guard is `true` or the real value. Forcing it `true` would only swallow a hypothetical `InvalidInput` that the test platform never produces. |
 | D | `persist.rs:273:25` `sync_parent_dir` `InvalidInput` guard → `false` | `false` | best-effort fsync | Same as C: on the test platform the directory fsync succeeds and this guard is not exercised, so forcing it `false` changes no observable output. Reliably producing an `InvalidInput` dir-fsync error is platform-dependent and not reproducible in CI. |

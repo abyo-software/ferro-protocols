@@ -569,23 +569,128 @@ mod tests {
     /// *next* temp name must not wedge the save — `create_new` (`O_EXCL`)
     /// fails on that name and the writer retries the next unique suffix,
     /// so the save still succeeds and the squatted file is untouched.
+    ///
+    /// To make the collision **deterministic** despite the process-global
+    /// `SAVE_SEQ` advancing under parallel tests, this squats a whole
+    /// contiguous *block* of candidate names: whatever sequence value the
+    /// save under test happens to start from, its first `create_new`
+    /// attempt lands inside the squatted block (`AlreadyExists`), so the
+    /// retry loop is genuinely exercised before it reaches a free name past
+    /// the block. The experiment is retried until the save provably started
+    /// inside the block (i.e. a real collision occurred).
+    ///
+    /// This pins the `err.kind() == AlreadyExists` retry guard at
+    /// `write_atomic_durable` in two of its three mutated forms:
+    /// * guard forced **`false`** → the very first `AlreadyExists` is
+    ///   returned immediately instead of retried, so `save` would **fail**;
+    /// * `==` flipped to **`!=`** → `AlreadyExists` is likewise treated as a
+    ///   propagate-immediately error, so `save` would **fail**.
+    ///
+    /// The real guard retries past the block and `save` **succeeds**, which
+    /// this test asserts.
     #[test]
     fn save_handles_create_new_temp_collision() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        // Reconstruct the exact name the next save attempt will try.
-        let seq = super::SAVE_SEQ.load(std::sync::atomic::Ordering::Relaxed);
-        let squat = tmp.path().join(format!(
-            "{STATE_FILE}.tmp.{pid}.{seq}",
-            pid = std::process::id()
-        ));
-        std::fs::write(&squat, b"squatter").unwrap();
+        // The retry loop allows 16 attempts; squat fewer than that so a free
+        // name always exists past the block (otherwise the save legitimately
+        // fails and the test could not distinguish a real collision).
+        const BLOCK: u64 = 8;
 
-        let map = BTreeMap::new();
-        save(tmp.path(), &map).expect("save retries past the squatted temp");
+        let mut hit_real_collision = false;
+        // A handful of attempts is plenty: each iteration only loses the race
+        // if a parallel `save` consumed the whole block between our snapshot
+        // and our own save's first attempt, which is vanishingly unlikely.
+        for _ in 0..32 {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let start = super::SAVE_SEQ.load(std::sync::atomic::Ordering::Relaxed);
+            let names: Vec<std::path::PathBuf> = (start..start + BLOCK)
+                .map(|seq| {
+                    tmp.path().join(format!(
+                        "{STATE_FILE}.tmp.{pid}.{seq}",
+                        pid = std::process::id()
+                    ))
+                })
+                .collect();
+            for name in &names {
+                std::fs::write(name, b"squatter").unwrap();
+            }
 
-        assert!(state_path(tmp.path()).exists(), "target written");
-        // The squatted file is left exactly as it was (not clobbered).
-        assert_eq!(std::fs::read(&squat).unwrap(), b"squatter");
+            let map = BTreeMap::new();
+            // The real guard retries past the squatted block → success.
+            save(tmp.path(), &map).expect("save retries past the squatted block");
+            assert!(state_path(tmp.path()).exists(), "target written");
+            // Every squatted file is left exactly as it was (not clobbered).
+            for name in &names {
+                assert_eq!(
+                    std::fs::read(name).unwrap(),
+                    b"squatter",
+                    "squatted temp must be untouched"
+                );
+            }
+
+            // Confirm the save actually *started* inside the squatted block
+            // (so a real `AlreadyExists` collision was hit and retried). The
+            // save consumes one sequence value per attempt; if it began at or
+            // after `start` it collided at least once before reaching the
+            // free name at `start + BLOCK`.
+            let after = super::SAVE_SEQ.load(std::sync::atomic::Ordering::Relaxed);
+            if after >= start + BLOCK {
+                hit_real_collision = true;
+                break;
+            }
+        }
+        assert!(
+            hit_real_collision,
+            "test must observe at least one genuine create_new collision"
+        );
+    }
+
+    /// R3-5 / guard-`true` killer: a `create_new` failure whose kind is
+    /// **not** `AlreadyExists` (here `NotFound`, because the data dir's
+    /// parent does not exist) must be **propagated immediately**, not folded
+    /// into the `O_EXCL`-collision retry loop.
+    ///
+    /// This pins the third mutated form of the
+    /// `err.kind() == AlreadyExists` guard at `write_atomic_durable`:
+    /// * guard forced **`true`** → a `NotFound` is treated as a temp-name
+    ///   collision and retried for the full 16 iterations before failing;
+    /// * `==` → **`!=`** → likewise routes `NotFound` into the retry arm.
+    ///
+    /// The observable difference is the number of `SAVE_SEQ` increments the
+    /// failing save consumes: the real guard returns after **one** attempt,
+    /// the mutated guard burns the full **16**. Because `SAVE_SEQ` is
+    /// process-global and advances under parallel tests, we take the
+    /// **minimum** consumption across several trials: the real guard can dip
+    /// to 1, but the mutant always consumes ≥ 16 on every trial, so a
+    /// minimum below 16 can only come from the real (propagate-after-one)
+    /// guard. The returned error kind is also asserted to be the propagated
+    /// `NotFound`.
+    #[test]
+    fn save_propagates_non_already_exists_create_error() {
+        let mut min_consumed = u64::MAX;
+        for _ in 0..8 {
+            let tmp = tempfile::TempDir::new().unwrap();
+            // A data dir whose parent does not exist: `create_new` on the
+            // temp path fails with NotFound, never AlreadyExists.
+            let missing = tmp.path().join("does-not-exist").join("nested");
+
+            let before = super::SAVE_SEQ.load(std::sync::atomic::Ordering::Relaxed);
+            let map = BTreeMap::new();
+            let err = save(&missing, &map).expect_err("save into a missing dir must fail");
+            let after = super::SAVE_SEQ.load(std::sync::atomic::Ordering::Relaxed);
+
+            assert_eq!(
+                err.kind(),
+                std::io::ErrorKind::NotFound,
+                "the non-AlreadyExists create error must be propagated verbatim"
+            );
+            min_consumed = min_consumed.min(after - before);
+        }
+        assert!(
+            min_consumed < 16,
+            "the real guard propagates after a single create attempt; a guard \
+             forced true (or == flipped to !=) would retry the full 16 \
+             (min consumed across trials = {min_consumed})"
+        );
     }
 
     /// True when no snapshot temp file (`index-state.json.tmp.*`) remains
