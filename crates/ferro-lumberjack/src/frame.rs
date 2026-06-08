@@ -1154,6 +1154,119 @@ mod tests {
         );
     }
 
+    #[test]
+    fn next_frame_min_header_boundary_is_strictly_less_than_two() {
+        // frame.rs:296 `avail < 2` (the "need a 2-byte header" guard).
+        // The existing `*_needs_exactly_six_bytes` tests feed 5→6 bytes and
+        // never exercise the `avail == 2` boundary, so `<` vs `<=` is not
+        // distinguished there. Feed EXACTLY two bytes that form a complete,
+        // header-decidable input: `[PROTOCOL_VERSION, <unknown type>]`.
+        //
+        //   real (`avail < 2`): 2 < 2 is false → reads the header → the
+        //       unknown frame type surfaces as `Err(UnknownFrameType)`.
+        //   `<=` mutant:        2 <= 2 is true  → returns `Ok(None)`.
+        //
+        // Asserting the Err at avail == 2 kills the `<=` mutant (and the
+        // `==`/`>` siblings, which would mis-handle the 2-byte case too).
+        let mut d = FrameDecoder::new();
+        d.feed(&[PROTOCOL_VERSION, b'Z']);
+        assert_eq!(d.pending(), 2, "exactly two bytes pending");
+        assert!(
+            matches!(d.next_frame(), Err(FrameError::UnknownFrameType(b'Z'))),
+            "avail == 2 must read the header (not be treated as `need more`)",
+        );
+
+        // And a bad-version 2-byte input is likewise decided at avail == 2.
+        let mut d2 = FrameDecoder::new();
+        d2.feed(b"1W");
+        assert_eq!(d2.pending(), 2);
+        assert!(
+            matches!(d2.next_frame(), Err(FrameError::UnsupportedVersion(b'1'))),
+            "avail == 2 must reach the version check",
+        );
+
+        // One byte really IS too few → None (pins the `2` and the `<`).
+        let mut d3 = FrameDecoder::new();
+        d3.feed(&[PROTOCOL_VERSION]);
+        assert_eq!(d3.next_frame().unwrap(), None, "1 byte < 2 → None");
+    }
+
+    #[test]
+    fn compressed_header_boundary_is_strictly_less_than_six() {
+        // frame.rs:376 `pending() < 6`. The existing
+        // `compressed_needs_six_header_bytes` test feeds a frame whose
+        // declared `len` is > 0, so at `pending() == 6` the *body* check
+        // (`pending() < 6 + len`) returns None regardless of the `< 6`
+        // operator — leaving `<` vs `<=` indistinguishable. Hand-craft a
+        // C frame with declared `len == 0` so the header alone (6 bytes) is
+        // a *complete* frame:
+        //
+        //   real (`pending() < 6`): 6 < 6 false → proceeds; the empty
+        //       compressed body decodes to an empty Vec, yielding
+        //       `Ok(Some(Frame::Compressed { decompressed: [] }))`.
+        //   `<=` mutant:            6 <= 6 true → returns `Ok(None)`.
+        //
+        // Some-vs-None at pending == 6 kills the `<=` mutant.
+        let mut d = FrameDecoder::new();
+        d.feed(&[PROTOCOL_VERSION, FRAME_TYPE_COMPRESSED, 0, 0, 0, 0]);
+        assert_eq!(d.pending(), 6, "exactly the 6-byte C header, len = 0");
+        let Some(Frame::Compressed { decompressed }) = d.next_frame().unwrap() else {
+            panic!(
+                "pending == 6 must enter the body path (empty body → empty frame), \
+                 not be treated as `need more bytes` (the `<=` mutant returns None)"
+            )
+        };
+        assert!(decompressed.is_empty(), "len == 0 → empty decompressed body");
+
+        // 5 bytes truly is short → None (pins the `6` and the `<`).
+        let mut d2 = FrameDecoder::new();
+        d2.feed(&[PROTOCOL_VERSION, FRAME_TYPE_COMPRESSED, 0, 0, 0]);
+        assert_eq!(d2.next_frame().unwrap(), None, "5 < 6 → None");
+    }
+
+    #[test]
+    fn legacy_d_frame_key_and_val_len_caps_accept_at_exactly_cap() {
+        // frame.rs:424 `key_len > cap` and 439 `val_len > cap`. The existing
+        // `*_caps` test only checks `cap + 1` (reject). The `>` vs `>=`
+        // mutants flip behaviour at the EXACT boundary `len == cap`, which
+        // must be ACCEPTED by the real `>` but REJECTED by the `>=` mutant.
+        // Build a complete D frame whose key_len and val_len both equal the
+        // cap and assert it decodes to a `Frame::Unknown`.
+        let cap: u32 = 3;
+        let cap_usize = cap as usize;
+        let mut frame = Vec::new();
+        frame.push(PROTOCOL_VERSION);
+        frame.push(FRAME_TYPE_DATA_LEGACY);
+        frame.extend_from_slice(&7u32.to_be_bytes()); // seq
+        frame.extend_from_slice(&1u32.to_be_bytes()); // pair_count = 1
+        frame.extend_from_slice(&cap.to_be_bytes()); // key_len == cap (3)
+        frame.extend_from_slice(b"abc"); // 3-byte key
+        frame.extend_from_slice(&cap.to_be_bytes()); // val_len == cap (3)
+        frame.extend_from_slice(b"xyz"); // 3-byte value
+
+        let mut d = FrameDecoder::with_max_frame_payload(cap_usize);
+        d.feed(&frame);
+        let Some(Frame::Unknown { frame_type, raw }) = d.next_frame().unwrap() else {
+            panic!(
+                "key_len == cap && val_len == cap must be ACCEPTED \
+                 (the `>=` mutants on 424/439 would reject as PayloadTooLarge)"
+            )
+        };
+        assert_eq!(frame_type, b'D');
+        // raw == 10 header + (4 + 3) key + (4 + 3) val = 24 bytes.
+        assert_eq!(raw.len(), 24);
+
+        // Sanity: cap - 1 (so len == cap is now strictly over) DOES reject,
+        // confirming the gate is live and the accept above was meaningful.
+        let mut d2 = FrameDecoder::with_max_frame_payload(cap_usize - 1);
+        d2.feed(&frame);
+        assert!(
+            matches!(d2.next_frame(), Err(FrameError::PayloadTooLarge { requested, limit })
+                if requested == cap_usize && limit == cap_usize - 1),
+            "key_len (== cap) now strictly exceeds the lowered cap → reject",
+        );
+    }
+
     proptest! {
         #[test]
         fn prop_json_frame_round_trip(seq: u32, payload: Vec<u8>) {
