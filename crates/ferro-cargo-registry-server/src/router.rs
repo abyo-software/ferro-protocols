@@ -121,23 +121,37 @@ impl CargoState {
     /// Mirror the in-memory index map to the durable snapshot, if
     /// persistence is enabled.
     ///
-    /// Call this while holding a read or write guard on
+    /// Call this while holding the **write** guard on
     /// [`crates`](Self::crates) so the snapshot is consistent with the map
-    /// that produced it. A write failure is logged and swallowed — a
-    /// failed durable mirror must not fail the originating request, and
-    /// the in-memory state remains authoritative until the next
-    /// successful save or a restart.
-    pub fn persist_locked(&self, crates: &BTreeMap<String, CrateRecord>) {
+    /// that produced it, and so the caller can still roll the in-memory
+    /// mutation back on failure before releasing the lock.
+    ///
+    /// When persistence is disabled (`data_dir == None`, the in-process /
+    /// unit-test path) this is a no-op that returns `Ok(())`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying I/O / serialization error when the snapshot
+    /// could not be written durably. Per DD R3-2 the caller must treat
+    /// this as a failed request — roll back the in-memory mutation (and,
+    /// for publish, delete the just-written tarball blob) and return a
+    /// `5xx` — rather than acknowledging a change that did not survive.
+    pub fn persist_locked(
+        &self,
+        crates: &BTreeMap<String, CrateRecord>,
+    ) -> Result<(), std::io::Error> {
         let Some(dir) = &self.data_dir else {
-            return;
+            return Ok(());
         };
         if let Err(err) = crate::persist::save(dir, crates) {
             tracing::error!(
                 data_dir = %dir.display(),
                 %err,
-                "failed to persist index snapshot; in-memory state is still authoritative"
+                "failed to persist index snapshot; rolling back in-memory mutation"
             );
+            return Err(err);
         }
+        Ok(())
     }
 }
 

@@ -982,3 +982,116 @@ async fn rejected_name_collision_leaves_no_orphan_blob() {
         "a rejected name collision must not leave an orphan blob"
     );
 }
+
+// ---------------------------------------------------------------------
+// DD R3-2: a durable-persistence failure must FAIL the mutating request
+// (roll back the in-memory change, delete the orphan blob for publish)
+// rather than returning success and silently losing the change on the
+// next restart.
+// ---------------------------------------------------------------------
+
+/// Build a `CargoState` whose blob store is writable but whose durable
+/// persistence directory is unusable, so the blob `put` succeeds while
+/// `persist::save` fails — exactly the R3-2 split that exposes the
+/// swallow-and-acknowledge bug.
+///
+/// The persistence dir is placed *under a regular file*, so creating the
+/// snapshot temp inside it fails with `ENOTDIR` regardless of the test
+/// process's uid (a plain `chmod 0500` would be bypassed under root).
+fn state_with_broken_persistence() -> (CargoState, Arc<FsBlobStore>, TempDir) {
+    let tmp = TempDir::new().expect("tempdir");
+    let blob_dir = tmp.path().join("blobs");
+    std::fs::create_dir_all(&blob_dir).expect("blob dir");
+    let store = Arc::new(FsBlobStore::new(&blob_dir).expect("blob store"));
+
+    // A regular file standing where the persistence dir's parent should
+    // be — any path *under* it is un-creatable (ENOTDIR).
+    let blocker = tmp.path().join("blocker");
+    std::fs::write(&blocker, b"not a directory").expect("blocker file");
+    let broken_data_dir = blocker.join("persist");
+
+    let state = CargoState::with_persistence(store.clone(), "http://localhost", broken_data_dir);
+    (state, store, tmp)
+}
+
+#[tokio::test]
+async fn publish_persist_failure_returns_500_rolls_back_and_leaves_no_orphan_blob() {
+    let (state, store, _tmp) = state_with_broken_persistence();
+    let app = router(state);
+
+    let resp = send(
+        &app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri("/api/v1/crates/new")
+            .body(Body::from(publish_body("foo", "1.0.0", b"undurable-bytes")))
+            .expect("build"),
+    )
+    .await;
+
+    // Must NOT be a success — the change was not durably stored.
+    assert_eq!(
+        resp.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "publish that cannot be persisted must fail, not return 2xx"
+    );
+
+    // In-memory state must not retain the entry: the sparse index 404s.
+    let resp = send(
+        &app,
+        Request::builder()
+            .method(Method::GET)
+            .uri("/index/3/f/foo")
+            .body(Body::empty())
+            .expect("build"),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "rolled-back publish must not stay in the in-memory index"
+    );
+
+    // And the just-written tarball blob must have been cleaned up.
+    assert_eq!(
+        blob_count(&store).await,
+        0,
+        "a rolled-back publish must not leave an orphan blob"
+    );
+}
+
+#[tokio::test]
+async fn failed_publish_leaves_no_phantom_entry_to_yank() {
+    // A publish whose persist fails rolls back fully — there is no phantom
+    // entry left behind, so a subsequent yank of that version is a clean
+    // 404 rather than operating on a half-published version.
+    let (state, store, _tmp) = state_with_broken_persistence();
+    let app = router(state);
+
+    let resp = send(
+        &app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri("/api/v1/crates/new")
+            .body(Body::from(publish_body("foo", "1.0.0", b"x")))
+            .expect("build"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(blob_count(&store).await, 0);
+
+    let resp = send(
+        &app,
+        Request::builder()
+            .method(Method::DELETE)
+            .uri("/api/v1/crates/foo/1.0.0/yank")
+            .body(Body::empty())
+            .expect("build"),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "no phantom entry survived the rolled-back publish"
+    );
+}

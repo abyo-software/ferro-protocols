@@ -65,6 +65,12 @@ pub enum CargoError {
     #[error("not implemented: {0}")]
     NotImplemented(String),
 
+    /// A mutation succeeded in memory but could not be made durable, so it
+    /// was rolled back rather than acknowledged. The client must retry;
+    /// the change was **not** stored (DD R3-2).
+    #[error("could not persist change durably: {0}")]
+    Persistence(String),
+
     /// Underlying blob-store error (I/O, digest mismatch, missing blob).
     #[error(transparent)]
     Storage(#[from] BlobStoreError),
@@ -82,6 +88,7 @@ impl CargoError {
             Self::NameConflict { .. } | Self::DuplicateVersion { .. } => StatusCode::CONFLICT,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
+            Self::Persistence(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Storage(err) => storage_status(err),
         }
     }
@@ -163,6 +170,16 @@ mod tests {
             computed: "b".into(),
         };
         assert_eq!(e.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// A persistence failure (mutation rolled back) is surfaced as `500`,
+    /// not a success — the client must know the change was not stored.
+    #[test]
+    fn persistence_is_500() {
+        assert_eq!(
+            CargoError::Persistence("disk full".into()).status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 
     /// `storage_status` maps a blob-store `NotFound` to `404`. Deleting

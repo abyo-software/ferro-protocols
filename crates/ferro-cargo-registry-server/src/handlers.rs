@@ -254,12 +254,30 @@ pub async fn handle_publish(
     // index entry. The blob put happens under the lock so the on-disk
     // state and the in-memory index advance together.
     state.blobs.put(&digest, tarball.clone()).await?;
-    let record = crates.entry(key).or_insert_with(CrateRecord::default);
-    record.tarballs.insert(entry.vers.clone(), digest.clone());
+    let vers_key = entry.vers.clone();
+    let record = crates.entry(key.clone()).or_insert_with(CrateRecord::default);
+    record.tarballs.insert(vers_key.clone(), digest.clone());
     record.entries.push(entry);
-    // R2-6: write the index map through to the durable snapshot while the
-    // lock is held so on-disk state matches memory.
-    state.persist_locked(&crates);
+
+    // R2-6 / R3-2: write the index map through to the durable snapshot
+    // while the lock is held so on-disk state matches memory. If the
+    // snapshot cannot be written we must NOT acknowledge the publish:
+    // roll back the in-memory entry and delete the just-written blob (if
+    // no surviving version still references it), then return 500 so the
+    // client knows the crate was not durably stored.
+    if let Err(err) = state.persist_locked(&crates) {
+        rollback_publish(&mut crates, &key, &vers_key, &digest);
+        drop(crates);
+        // Best-effort orphan-blob cleanup. A content-addressed blob may be
+        // shared with another version (identical bytes); only delete it
+        // when no remaining mapping references this digest.
+        if !digest_still_referenced(&state, &digest).await
+            && let Err(del_err) = state.blobs.delete(&digest).await
+        {
+            tracing::error!(%del_err, "failed to delete orphan blob after persist rollback");
+        }
+        return Err(CargoError::Persistence(err.to_string()));
+    }
     drop(crates);
 
     debug!(crate_name = %name, version = %vers, "publish complete");
@@ -274,6 +292,45 @@ pub async fn handle_publish(
         })),
     )
         .into_response())
+}
+
+/// Undo the in-memory effect of a publish whose durable snapshot write
+/// failed (DD R3-2): remove the version's tarball mapping and the index
+/// entry just appended for `vers`, and drop the crate record entirely if
+/// that leaves it empty (the publish that created it).
+///
+/// The caller still holds the write guard, so this leaves the in-memory
+/// map exactly as it was before the failed publish.
+fn rollback_publish(
+    crates: &mut std::collections::BTreeMap<String, CrateRecord>,
+    key: &str,
+    vers: &str,
+    digest: &Digest,
+) {
+    if let Some(record) = crates.get_mut(key) {
+        // Only un-map if the mapping still points at the blob we wrote —
+        // never clobber a pre-existing version of the same string (there
+        // can be only one per `vers`, but stay defensive).
+        if record.tarballs.get(vers) == Some(digest) {
+            record.tarballs.remove(vers);
+        }
+        record.entries.retain(|e| e.vers != vers);
+        if record.entries.is_empty() && record.tarballs.is_empty() && record.owners.is_empty() {
+            crates.remove(key);
+        }
+    }
+}
+
+/// Whether any crate still maps a version to `digest`.
+///
+/// Used after a publish rollback to decide if the just-written tarball
+/// blob is now an orphan (safe to delete) or is shared with another,
+/// surviving version (must be kept). Takes the read lock briefly.
+async fn digest_still_referenced(state: &CargoState, digest: &Digest) -> bool {
+    let crates = state.crates.read().await;
+    crates
+        .values()
+        .any(|rec| rec.tarballs.values().any(|d| d == digest))
 }
 
 /// `GET /api/v1/crates/{name}/{version}/download`.
@@ -341,9 +398,20 @@ async fn set_yanked(
         .iter_mut()
         .find(|e| e.vers == version)
         .ok_or_else(|| CargoError::NotFound(format!("{name} {version}")))?;
+    let previous = entry.yanked;
     entry.yanked = yanked;
-    // R2-6: yank / unyank mutate an existing index line; mirror it.
-    state.persist_locked(&crates);
+    // R2-6 / R3-2: yank / unyank mutate an existing index line; mirror it.
+    // On a durable-write failure, restore the prior flag and fail the
+    // request rather than acknowledging a change that was not persisted.
+    if let Err(err) = state.persist_locked(&crates) {
+        if let Some(record) = crates.get_mut(&canonical_name(name))
+            && let Some(entry) = record.entries.iter_mut().find(|e| e.vers == version)
+        {
+            entry.yanked = previous;
+        }
+        drop(crates);
+        return Err(CargoError::Persistence(err.to_string()));
+    }
     drop(crates);
     Ok(())
 }
@@ -408,6 +476,9 @@ async fn mutate_owners(
     let record = crates
         .get_mut(&canonical_name(name))
         .ok_or_else(|| CargoError::NotFound(name.to_owned()))?;
+    // Snapshot the prior owner list so a failed durable write can be
+    // rolled back (R3-2).
+    let previous_owners = record.owners.clone();
     if remove {
         record
             .owners
@@ -427,8 +498,16 @@ async fn mutate_owners(
             next_id += 1;
         }
     }
-    // R2-6: owner changes are durable index state; mirror them.
-    state.persist_locked(&crates);
+    // R2-6 / R3-2: owner changes are durable index state; mirror them. On
+    // a durable-write failure, restore the prior owner list and fail the
+    // request rather than acknowledging an un-persisted change.
+    if let Err(err) = state.persist_locked(&crates) {
+        if let Some(record) = crates.get_mut(&canonical_name(name)) {
+            record.owners = previous_owners;
+        }
+        drop(crates);
+        return Err(CargoError::Persistence(err.to_string()));
+    }
     drop(crates);
     Ok(())
 }
@@ -443,8 +522,18 @@ pub fn derive_index_path(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::derive_index_path;
-    use crate::name::index_path;
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    use ferro_blob_store::{Digest, FsBlobStore};
+    use tokio::sync::RwLock;
+
+    use super::{derive_index_path, mutate_owners, set_yanked};
+    use crate::config::IndexConfig;
+    use crate::index::IndexEntry;
+    use crate::name::{canonical_name, index_path};
+    use crate::owners::Owner;
+    use crate::router::{CargoState, CrateRecord};
 
     /// `derive_index_path` is the thin re-export the handlers use; it must
     /// return the real layout, not an empty / placeholder string. This
@@ -460,5 +549,131 @@ mod tests {
         assert_eq!(derive_index_path("serde"), "se/rd/serde");
         assert_eq!(derive_index_path("a"), "1/a");
         assert!(!derive_index_path("serde").is_empty());
+    }
+
+    /// Build a `CargoState` that already holds `record` for `key` in
+    /// memory, with a blob store under `tmp` and a **broken** persistence
+    /// dir (a path under a regular file → `ENOTDIR` on save). This lets a
+    /// yank / owner mutation reach `persist_locked`, fail the durable
+    /// write, and exercise the R3-2 rollback path.
+    fn state_with_seed_and_broken_persistence(
+        tmp: &tempfile::TempDir,
+        key: &str,
+        record: CrateRecord,
+    ) -> CargoState {
+        let blob_dir = tmp.path().join("blobs");
+        std::fs::create_dir_all(&blob_dir).unwrap();
+        let blocker = tmp.path().join("blocker");
+        std::fs::write(&blocker, b"file").unwrap();
+
+        let mut map = BTreeMap::new();
+        map.insert(key.to_owned(), record);
+
+        CargoState {
+            blobs: Arc::new(FsBlobStore::new(&blob_dir).unwrap()),
+            crates: Arc::new(RwLock::new(map)),
+            config: Arc::new(IndexConfig::new("http://localhost")),
+            data_dir: Some(Arc::new(blocker.join("persist"))),
+        }
+    }
+
+    fn seed_entry(vers: &str, yanked: bool) -> IndexEntry {
+        IndexEntry {
+            name: "foo".into(),
+            vers: vers.into(),
+            deps: vec![],
+            cksum: Digest::sha256_of(b"seed").hex().to_owned(),
+            features: BTreeMap::new(),
+            yanked,
+            links: None,
+            v: Some(2),
+            features2: None,
+            rust_version: None,
+        }
+    }
+
+    /// R3-2: a yank whose durable snapshot write fails must return a
+    /// persistence error AND leave the in-memory `yanked` flag at its
+    /// prior value (rolled back), not the attempted new value.
+    #[tokio::test]
+    async fn yank_rolls_back_in_memory_flag_when_persist_fails() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = CrateRecord {
+            entries: vec![seed_entry("1.0.0", false)],
+            tarballs: BTreeMap::new(),
+            owners: vec![],
+        };
+        let state = state_with_seed_and_broken_persistence(&tmp, &canonical_name("foo"), record);
+
+        let err = set_yanked(&state, "foo", "1.0.0", true)
+            .await
+            .expect_err("persist failure must surface as an error");
+        assert_eq!(err.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+
+        // The flag must NOT have flipped — the change was not durable.
+        let yanked = {
+            let crates = state.crates.read().await;
+            crates[&canonical_name("foo")].entries[0].yanked
+        };
+        assert!(!yanked, "failed yank must roll the yanked flag back to false");
+    }
+
+    /// R3-2: an owner mutation whose durable snapshot write fails must
+    /// return a persistence error AND restore the prior owner list.
+    #[tokio::test]
+    async fn owner_add_rolls_back_when_persist_fails() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = CrateRecord {
+            entries: vec![seed_entry("1.0.0", false)],
+            tarballs: BTreeMap::new(),
+            owners: vec![Owner {
+                id: 1,
+                login: "alice".into(),
+                name: None,
+            }],
+        };
+        let state = state_with_seed_and_broken_persistence(&tmp, &canonical_name("foo"), record);
+
+        let err = mutate_owners(&state, "foo", &["bob".to_owned()], false)
+            .await
+            .expect_err("persist failure must surface as an error");
+        assert_eq!(err.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+
+        // The owner list must be exactly the original — bob not added.
+        let owners = {
+            let crates = state.crates.read().await;
+            crates[&canonical_name("foo")].owners.clone()
+        };
+        assert_eq!(owners.len(), 1, "failed add must roll the owner list back");
+        assert_eq!(owners[0].login, "alice");
+    }
+
+    /// R3-2: with persistence **disabled** (`data_dir == None`, the
+    /// in-memory / unit-test path) a yank still succeeds — the no-op
+    /// `persist_locked` returns `Ok`, so behaviour is unchanged.
+    #[tokio::test]
+    async fn yank_succeeds_with_persistence_disabled() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = Arc::new(FsBlobStore::new(tmp.path()).unwrap());
+        let state = CargoState::new(store, "http://localhost");
+        {
+            let mut crates = state.crates.write().await;
+            crates.insert(
+                canonical_name("foo"),
+                CrateRecord {
+                    entries: vec![seed_entry("1.0.0", false)],
+                    tarballs: BTreeMap::new(),
+                    owners: vec![],
+                },
+            );
+        }
+        set_yanked(&state, "foo", "1.0.0", true)
+            .await
+            .expect("yank succeeds without persistence");
+        let yanked = {
+            let crates = state.crates.read().await;
+            crates[&canonical_name("foo")].entries[0].yanked
+        };
+        assert!(yanked);
     }
 }
