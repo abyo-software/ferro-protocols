@@ -1,6 +1,9 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # ferro-blob-store
 
+[![crates.io](https://img.shields.io/crates/v/ferro-blob-store.svg)](https://crates.io/crates/ferro-blob-store)
+[![docs.rs](https://img.shields.io/docsrs/ferro-blob-store)](https://docs.rs/ferro-blob-store)
+[![CI](https://github.com/abyo-software/ferro-protocols/actions/workflows/ci.yml/badge.svg)](https://github.com/abyo-software/ferro-protocols/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](../../LICENSE)
 [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](../../rust-toolchain.toml)
 

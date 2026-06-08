@@ -8,6 +8,10 @@ releases. Breaking changes will be released as a separate `v0.2.0`.
 
 ## [Unreleased]
 
+### Documentation
+- Added crates.io, docs.rs, and CI status badges to the README, which is
+  also the docs.rs landing page (`#![doc = include_str!("../README.md")]`).
+
 ### Added
 - `tests/fixtures/` — vendored real Maven Central artefacts for
   `org.apache.commons:commons-lang3:3.14.0`: the live

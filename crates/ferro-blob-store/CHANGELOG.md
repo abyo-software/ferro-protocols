@@ -8,6 +8,10 @@ allowed between any two releases until `v0.1.0`.
 
 ## [Unreleased]
 
+### Documentation
+- Added crates.io, docs.rs, and CI status badges to the README, which is
+  also the docs.rs landing page (`#![doc = include_str!("../README.md")]`).
+
 ## [0.1.0] — 2026-05-04
 
 First beta release. The crate has been stable since `v0.0.1`; this
