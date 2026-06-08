@@ -25,3 +25,10 @@ path = "fuzz_targets/parse_layout_path.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "parse_metadata_xml"
+path = "fuzz_targets/parse_metadata_xml.rs"
+test = false
+doc = false
+bench = false
