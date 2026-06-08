@@ -78,7 +78,10 @@ pub mod yank;
 
 pub use config::IndexConfig;
 pub use error::CargoError;
-pub use index::{IndexDep, IndexEntry, entry_from_manifest, parse_lines, render_lines};
+pub use index::{
+    IndexDep, IndexEntry, PublishDep, PublishManifest, entry_from_manifest, parse_lines,
+    render_lines,
+};
 pub use metrics::{Metrics, MetricsState, instrument, metrics_routes};
 pub use name::{MAX_NAME_LEN, index_path, is_valid_name, validate_name};
 pub use owners::{Owner, OwnersMutationResponse, OwnersRequest, OwnersResponse};
