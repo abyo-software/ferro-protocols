@@ -617,3 +617,197 @@ async fn probe_routes_live_ready_healthz() {
         assert_eq!(status, StatusCode::OK, "GET {uri}");
     }
 }
+
+// ---- F1: manifest PUT by digest must verify digest matches body --------
+
+#[tokio::test]
+async fn manifest_put_by_digest_mismatch_is_rejected() {
+    let app = app();
+    // A valid minimal manifest whose *real* digest is D2…
+    let manifest = json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": { "mediaType": "application/vnd.oci.image.config.v1+json", "digest": EMPTY_DIGEST, "size": 2 },
+        "layers": []
+    });
+    let body = serde_json::to_vec(&manifest).expect("ser");
+    // …but the client lies and pushes it under a *different* digest D1.
+    let wrong_digest = Digest::sha256_of(b"a completely different payload").to_string();
+    let req = Request::builder()
+        .method(Method::PUT)
+        .uri(format!("/v2/repo/manifests/{wrong_digest}"))
+        .header(
+            header::CONTENT_TYPE,
+            "application/vnd.oci.image.manifest.v1+json",
+        )
+        .body(Body::from(body))
+        .expect("req");
+    let (status, _h, body) = send(&app, req).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "mismatched by-digest PUT");
+    assert_error_code(&body, "DIGEST_INVALID");
+}
+
+#[tokio::test]
+async fn manifest_put_by_matching_digest_succeeds() {
+    let app = app();
+    let manifest = json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": { "mediaType": "application/vnd.oci.image.config.v1+json", "digest": EMPTY_DIGEST, "size": 2 },
+        "layers": []
+    });
+    let body = serde_json::to_vec(&manifest).expect("ser");
+    // Push under the *correct* digest → 201.
+    let digest = Digest::sha256_of(&body).to_string();
+    let req = Request::builder()
+        .method(Method::PUT)
+        .uri(format!("/v2/repo/manifests/{digest}"))
+        .header(
+            header::CONTENT_TYPE,
+            "application/vnd.oci.image.manifest.v1+json",
+        )
+        .body(Body::from(body))
+        .expect("req");
+    let (status, headers, _b) = send(&app, req).await;
+    assert_eq!(status, StatusCode::CREATED, "matching by-digest PUT");
+    assert_eq!(headers["docker-content-digest"], digest);
+}
+
+// ---- F2: chunked uploads are bounded by a per-session size cap ----------
+
+/// Build an app whose upload-session cap is forced to `cap` bytes so the
+/// cap-exceeded path can be driven with a few bytes instead of gigabytes.
+fn app_with_upload_cap(cap: u64) -> Router {
+    let blob_store: SharedBlobStore = Arc::new(InMemoryBlobStore::new());
+    let registry = Arc::new(InMemoryRegistryMeta::new());
+    let state = AppState::with_max_upload_session_bytes(blob_store, registry, cap);
+    router(state).merge(probe_routes())
+}
+
+#[tokio::test]
+async fn chunked_upload_past_session_cap_is_rejected_and_buffer_dropped() {
+    // Cap the session at 8 bytes.
+    let app = app_with_upload_cap(8);
+    let (_s, headers, _b) =
+        send(&app, method(Method::POST, "/v2/repo/blobs/uploads/", Body::empty())).await;
+    let location = headers[header::LOCATION].to_str().unwrap().to_owned();
+
+    // First chunk (5 bytes) fits under the 8-byte cap → 202.
+    let req = Request::builder()
+        .method(Method::PATCH)
+        .uri(&location)
+        .header(header::CONTENT_RANGE, "0-4")
+        .body(Body::from(&b"hello"[..]))
+        .expect("req");
+    let (status, _h, _b) = send(&app, req).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "first sub-cap chunk");
+
+    // Second chunk (5 bytes) would bring the total to 10 > 8 → 413,
+    // and the session is dropped.
+    let req = Request::builder()
+        .method(Method::PATCH)
+        .uri(&location)
+        .header(header::CONTENT_RANGE, "5-9")
+        .body(Body::from(&b"world"[..]))
+        .expect("req");
+    let (status, _h, body) = send(&app, req).await;
+    assert_eq!(
+        status,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "over-cap chunk rejected"
+    );
+    assert_error_code(&body, "BLOB_UPLOAD_INVALID");
+
+    // The session was dropped on overflow: a subsequent status GET 404s,
+    // proving the buffered bytes are no longer retained (no unbounded
+    // growth).
+    let (status, _h, body) = send(&app, get(&location)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "session dropped after overflow");
+    assert_error_code(&body, "BLOB_UPLOAD_UNKNOWN");
+
+    // Sanity: the production default cap is the documented 4 GiB.
+    assert_eq!(
+        ferro_oci_server::MAX_UPLOAD_SESSION_BYTES,
+        4 * 1024 * 1024 * 1024
+    );
+}
+
+// ---- F3: body limit raised above Axum's 2 MiB default -------------------
+
+#[tokio::test]
+async fn manifest_put_3mib_succeeds_past_axum_default_limit() {
+    let app = app();
+    // Build a valid image manifest inflated to ~3 MiB via a large
+    // annotation value. This exceeds Axum's 2 MiB DefaultBodyLimit and
+    // would 413 without the explicit higher limit; OCI requires
+    // registries to accept manifests of at least 4 MiB.
+    let big = "x".repeat(3 * 1024 * 1024);
+    let manifest = json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": { "mediaType": "application/vnd.oci.image.config.v1+json", "digest": EMPTY_DIGEST, "size": 2 },
+        "layers": [],
+        "annotations": { "com.example.padding": big }
+    });
+    let body = serde_json::to_vec(&manifest).expect("ser");
+    assert!(body.len() > 2 * 1024 * 1024, "manifest exceeds 2 MiB");
+    let req = Request::builder()
+        .method(Method::PUT)
+        .uri("/v2/repo/manifests/latest")
+        .header(
+            header::CONTENT_TYPE,
+            "application/vnd.oci.image.manifest.v1+json",
+        )
+        .body(Body::from(body))
+        .expect("req");
+    let (status, _h, _b) = send(&app, req).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "3 MiB manifest accepted past the 2 MiB default"
+    );
+}
+
+// ---- F6: PATCH Content-Range inclusive length must match body length ----
+
+#[tokio::test]
+async fn patch_content_range_length_mismatch_is_rejected() {
+    let app = app();
+    let (_s, headers, _b) =
+        send(&app, method(Method::POST, "/v2/repo/blobs/uploads/", Body::empty())).await;
+    let location = headers[header::LOCATION].to_str().unwrap().to_owned();
+
+    // Content-Range claims 0-999999 (1_000_000 bytes) but the body is a
+    // single byte → must be rejected, not silently accepted.
+    let req = Request::builder()
+        .method(Method::PATCH)
+        .uri(&location)
+        .header(header::CONTENT_RANGE, "0-999999")
+        .body(Body::from(&b"x"[..]))
+        .expect("req");
+    let (status, _h, body) = send(&app, req).await;
+    assert_eq!(
+        status,
+        StatusCode::RANGE_NOT_SATISFIABLE,
+        "range/body length mismatch"
+    );
+    assert_error_code(&body, "BLOB_UPLOAD_INVALID");
+}
+
+#[tokio::test]
+async fn patch_content_range_length_match_is_accepted() {
+    let app = app();
+    let (_s, headers, _b) =
+        send(&app, method(Method::POST, "/v2/repo/blobs/uploads/", Body::empty())).await;
+    let location = headers[header::LOCATION].to_str().unwrap().to_owned();
+
+    // Content-Range 0-4 spans 5 bytes; body is exactly 5 bytes → 202.
+    let req = Request::builder()
+        .method(Method::PATCH)
+        .uri(&location)
+        .header(header::CONTENT_RANGE, "0-4")
+        .body(Body::from(&b"hello"[..]))
+        .expect("req");
+    let (status, _h, _b) = send(&app, req).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "matching range/body length");
+}

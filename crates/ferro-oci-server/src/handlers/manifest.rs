@@ -325,6 +325,25 @@ pub async fn put_manifest(
 
     let digest = Digest::sha256_of(&body);
 
+    // Spec §4.4: when the client pushes a manifest *by digest*
+    // (`PUT /v2/{name}/manifests/sha256:<D>`), the registry MUST verify
+    // that the supplied digest matches the manifest content. Accepting a
+    // mismatched digest would let a client register bytes hashing to
+    // `<D2>` under the key `<D1>`, corrupting content-addressing. We
+    // reject the mismatch with `400 DIGEST_INVALID` (only sha256 manifest
+    // digests are produced here, so compare on the hex when the algos
+    // agree).
+    if let Reference::Digest(declared) = &reference
+        && declared.algo() == digest.algo()
+        && declared.hex() != digest.hex()
+    {
+        return OciError::new(
+            OciErrorCode::DigestInvalid,
+            format!("manifest digest mismatch: reference {declared}, computed {digest}"),
+        )
+        .into_response();
+    }
+
     // Register any referrer (subject field).
     let subject_digest = parsed
         .get("subject")
