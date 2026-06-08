@@ -319,7 +319,7 @@ pub async fn put_manifest(
     // and every `layers[]` entry. For image indexes, check every
     // `manifests[]` entry's digest is present as a manifest body
     // (already registered) OR the digest exists as a blob.
-    if let Err(e) = verify_referenced_blobs(state, &parsed, kind).await {
+    if let Err(e) = verify_referenced_blobs(state, name, &parsed, kind).await {
         return e.into_response();
     }
 
@@ -331,9 +331,23 @@ pub async fn put_manifest(
         .and_then(|s| s.get("digest"))
         .and_then(Value::as_str)
         .and_then(|s| s.parse::<Digest>().ok());
+    // OCI Image Spec v1.1: the referrers descriptor's `artifactType`
+    // is the manifest's top-level `artifactType`, or — when that is
+    // empty/absent — a fallback to the manifest's `config.mediaType`.
+    // The conformance suite's Content-Discovery filter relies on this
+    // fallback: it pushes referrers with no `artifactType` whose
+    // `config.mediaType` is the type being filtered on, and expects
+    // them to surface under `?artifactType=<that config media type>`.
     let artifact_type = parsed
         .get("artifactType")
         .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            parsed
+                .get("config")
+                .and_then(|c| c.get("mediaType"))
+                .and_then(Value::as_str)
+        })
         .map(str::to_owned);
     let annotations = parsed
         .get("annotations")
@@ -425,6 +439,7 @@ pub async fn delete_manifest(state: &AppState, name: &str, reference_str: &str) 
 
 async fn verify_referenced_blobs(
     state: &AppState,
+    name: &str,
     parsed: &Value,
     kind: ManifestKind,
 ) -> Result<(), OciError> {
@@ -445,32 +460,36 @@ async fn verify_referenced_blobs(
         }
         ManifestKind::ImageIndex => {
             // Per spec §4.4, each manifest in the index must already
-            // be registered as a manifest body. We check the blob
-            // store first (covers the case where the index manifests
-            // were uploaded as raw blobs) and fall through silently
-            // if the registry records them — either is spec-valid.
+            // be present — either registered as a manifest body in the
+            // metadata plane (the usual case: clients push the child
+            // manifests first, then the index that aggregates them) or
+            // stored as a raw blob. Accept either.
             if let Some(manifests) = parsed.get("manifests").and_then(Value::as_array) {
                 for manifest in manifests {
                     if let Some(d) = manifest.get("digest").and_then(Value::as_str) {
-                        // For indexes we accept either a registered
-                        // manifest OR a stored blob. Blob check first.
                         let digest = d.parse::<Digest>().map_err(|e| {
                             OciError::new(
                                 OciErrorCode::ManifestInvalid,
                                 format!("invalid digest in manifests[]: {e}"),
                             )
                         })?;
-                        let present = state
+                        // 1. Registered as a manifest in this namespace?
+                        let as_manifest = state
+                            .registry
+                            .get_manifest(name, &Reference::Digest(digest.clone()))
+                            .await
+                            .map_err(OciError::from)?
+                            .is_some();
+                        if as_manifest {
+                            continue;
+                        }
+                        // 2. Stored as a raw blob?
+                        let as_blob = state
                             .blob_store
                             .contains(&digest)
                             .await
                             .map_err(OciError::from)?;
-                        if !present {
-                            // Also accept if the digest resolves as a
-                            // manifest in any known name — we do a
-                            // lightweight check by looking up the
-                            // digest as a reference in the same name
-                            // is left for Phase 2; reject for now.
+                        if !as_blob {
                             return Err(OciError::new(
                                 OciErrorCode::ManifestBlobUnknown,
                                 format!("referenced manifest digest {d} not present"),

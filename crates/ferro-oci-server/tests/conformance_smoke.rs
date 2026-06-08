@@ -465,6 +465,96 @@ async fn manifest_put_and_get_by_tag_and_digest_and_tag_listing() {
 }
 
 #[tokio::test]
+async fn image_index_referencing_registered_child_manifests_is_accepted() {
+    // OCI Distribution Spec v1.1 §4.4: a client pushes child image
+    // manifests first, then an image index that aggregates them by
+    // digest. The child manifests live in the metadata plane (not the
+    // blob store), so index push validation must accept a referenced
+    // digest that resolves as a *registered manifest*, not only as a
+    // raw blob. This is exactly the Content-Discovery "References
+    // setup" step the upstream conformance suite performs, and the
+    // root cause of the 4 discovery failures before this fix.
+    let (app, _tmp) = make_app();
+    let name = "lib/index";
+
+    // Push a config blob + a child image manifest.
+    let config = Bytes::from_static(b"{\"architecture\":\"amd64\",\"os\":\"linux\"}");
+    let config_digest = Digest::sha256_of(&config);
+    let (status, _h, _b) = send(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri(format!("/v2/{name}/blobs/uploads/?digest={config_digest}"))
+            .body(Body::from(config.clone()))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let child = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {
+            "mediaType": "application/vnd.oci.image.config.v1+json",
+            "digest": config_digest.to_string(),
+            "size": config.len(),
+        },
+        "layers": [],
+    });
+    let child_bytes = Bytes::from(serde_json::to_vec(&child).unwrap());
+    let child_digest = Digest::sha256_of(&child_bytes);
+    let (status, _h, _b) = send(
+        &app,
+        Request::builder()
+            .method("PUT")
+            .uri(format!("/v2/{name}/manifests/{child_digest}"))
+            .header(
+                header::CONTENT_TYPE,
+                "application/vnd.oci.image.manifest.v1+json",
+            )
+            .body(Body::from(child_bytes.clone()))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "child manifest push");
+
+    // Push an index that references the child by digest. The child is
+    // only in the metadata plane — NOT in the blob store — so this must
+    // still be accepted.
+    let index = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "manifests": [
+            {
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "digest": child_digest.to_string(),
+                "size": child_bytes.len(),
+            }
+        ],
+    });
+    let index_bytes = Bytes::from(serde_json::to_vec(&index).unwrap());
+    let index_digest = Digest::sha256_of(&index_bytes);
+    let (status, _h, body) = send(
+        &app,
+        Request::builder()
+            .method("PUT")
+            .uri(format!("/v2/{name}/manifests/{index_digest}"))
+            .header(
+                header::CONTENT_TYPE,
+                "application/vnd.oci.image.index.v1+json",
+            )
+            .body(Body::from(index_bytes))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "index referencing a registered (non-blob) child manifest must succeed — got {status:?} body={body:?}"
+    );
+}
+
+#[tokio::test]
 async fn referrers_api_empty_and_populated() {
     let (app, _tmp) = make_app();
     let name = "lib/referrers";
