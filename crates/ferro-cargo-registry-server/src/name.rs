@@ -115,6 +115,28 @@ mod tests {
         assert!(!is_valid_name(&"a".repeat(65)));
     }
 
+    /// Boundary: the length check is `name.len() > MAX_NAME_LEN`, so a
+    /// name of *exactly* `MAX_NAME_LEN` (64) is valid and 65 is not. This
+    /// kills the `>` → `>=` mutant (which would reject the 64-char name).
+    #[test]
+    fn name_length_boundary_is_inclusive_at_max() {
+        use super::MAX_NAME_LEN;
+        let at_max = "a".repeat(MAX_NAME_LEN);
+        assert_eq!(at_max.len(), 64);
+        assert!(is_valid_name(&at_max), "64-char name must be valid");
+        let over_max = "a".repeat(MAX_NAME_LEN + 1);
+        assert!(!is_valid_name(&over_max), "65-char name must be invalid");
+    }
+
+    /// The `0`-length arm of `index_path` returns the empty string — a
+    /// canonical layout that no other arm produces. Deleting the arm would
+    /// route an empty name through the `_` arm and slice-panic, so an
+    /// explicit assertion pins the empty result.
+    #[test]
+    fn index_path_empty_name_is_empty_string() {
+        assert_eq!(index_path(""), "");
+    }
+
     #[test]
     fn validate_surface_error() {
         let e = validate_name("").unwrap_err();

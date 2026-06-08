@@ -809,6 +809,144 @@ async fn index_state_survives_simulated_restart() {
     assert_eq!(got.as_ref(), b"durable-bytes");
 }
 
+/// Owner ids are assigned by an incrementing counter
+/// (`max(existing)+1`, then `+= 1` per added owner). They must be
+/// distinct, sequential, and start at 1 — pinning the `+`/`+=` arithmetic
+/// against `*`/`*=` mutants (which would collapse ids to 0 / a constant).
+#[tokio::test]
+async fn owner_ids_are_sequential_and_distinct() {
+    let (app, _tmp) = setup();
+    send(
+        &app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri("/api/v1/crates/new")
+            .body(Body::from(publish_body("foo", "1.0.0", b"x")))
+            .expect("build"),
+    )
+    .await;
+
+    // Add three owners in one request.
+    let resp = send(
+        &app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri("/api/v1/crates/foo/owners")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&json!({"users": ["alice", "bob", "carol"]})).unwrap(),
+            ))
+            .expect("build"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = send(
+        &app,
+        Request::builder()
+            .method(Method::GET)
+            .uri("/api/v1/crates/foo/owners")
+            .body(Body::empty())
+            .expect("build"),
+    )
+    .await;
+    let body = to_bytes(resp.into_body(), 4096).await.expect("body");
+    let v: Value = serde_json::from_slice(&body).unwrap();
+    let users = v["users"].as_array().unwrap();
+    assert_eq!(users.len(), 3);
+    // First added owner starts at id 1 (kills `max(0)+1` → `max(0)*1`=0).
+    assert_eq!(users[0]["id"], 1, "first owner id must be 1");
+    // Subsequent ids increment by one and are all distinct (kills
+    // `next_id += 1` → `next_id *= 1`, which would repeat id 1).
+    assert_eq!(users[1]["id"], 2, "second owner id must be 2");
+    assert_eq!(users[2]["id"], 3, "third owner id must be 3");
+
+    // A second add-call continues the sequence above the prior max.
+    let resp = send(
+        &app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri("/api/v1/crates/foo/owners")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&json!({"users": ["dave"]})).unwrap(),
+            ))
+            .expect("build"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let resp = send(
+        &app,
+        Request::builder()
+            .method(Method::GET)
+            .uri("/api/v1/crates/foo/owners")
+            .body(Body::empty())
+            .expect("build"),
+    )
+    .await;
+    let body = to_bytes(resp.into_body(), 4096).await.expect("body");
+    let v: Value = serde_json::from_slice(&body).unwrap();
+    let dave = v["users"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["login"] == "dave")
+        .expect("dave present");
+    // max prior id was 3 → dave is 4 (kills `max(..)+1` → `max(..)*1`=3,
+    // which would duplicate carol's id).
+    assert_eq!(dave["id"], 4, "next owner id continues above the prior max");
+}
+
+/// The root-relative sparse-index handler (`handle_sparse_index_root2`)
+/// serves short-name line files for `index = "sparse+http://host/"`
+/// (no `/index/` prefix). A two-segment path like `2/ab` must return the
+/// published entry, not an empty / default response — killing the
+/// `Ok(Default::default())` mutant on `handle_sparse_index_root2`.
+#[tokio::test]
+async fn root_relative_two_segment_index_serves_entry() {
+    let (app, _tmp) = setup();
+    send(
+        &app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri("/api/v1/crates/new")
+            .body(Body::from(publish_body("ab", "1.0.0", b"two-char")))
+            .expect("build"),
+    )
+    .await;
+
+    // Bare `2/ab` (no `/index/` prefix) → root2 handler.
+    let resp = send(
+        &app,
+        Request::builder()
+            .method(Method::GET)
+            .uri("/2/ab")
+            .body(Body::empty())
+            .expect("build"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK, "root-relative path resolves");
+    let body = to_bytes(resp.into_body(), 4096).await.expect("body");
+    let text = std::str::from_utf8(&body).expect("utf8");
+    let first = text.lines().next().expect("an index line is served");
+    let v: Value = serde_json::from_str(first).expect("parse line");
+    assert_eq!(v["name"], "ab");
+    assert_eq!(v["vers"], "1.0.0");
+
+    // An unknown two-segment name is a 404 (not a default/empty 200) —
+    // proving the handler actually consults the index.
+    let resp = send(
+        &app,
+        Request::builder()
+            .method(Method::GET)
+            .uri("/2/zz")
+            .body(Body::empty())
+            .expect("build"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
 /// R2-8 regression: a publish rejected by the name-collision check
 /// (`foo_bar` vs `foo-bar`) likewise leaves no orphan blob.
 #[tokio::test]

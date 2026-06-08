@@ -334,7 +334,67 @@ pub fn instrument(app: Router, metrics: Metrics, cargo: CargoState) -> Router {
 
 #[cfg(test)]
 mod tests {
-    use super::Metrics;
+    use super::{Metrics, method_label};
+    use axum::http::Method;
+
+    /// Each HTTP method maps to its own stable static label. Deleting any
+    /// arm would fold that method into the `"OTHER"` catch-all, so every
+    /// method is asserted distinctly.
+    #[test]
+    fn method_label_maps_each_method() {
+        assert_eq!(method_label(&Method::GET), "GET");
+        assert_eq!(method_label(&Method::HEAD), "HEAD");
+        assert_eq!(method_label(&Method::POST), "POST");
+        assert_eq!(method_label(&Method::PUT), "PUT");
+        assert_eq!(method_label(&Method::PATCH), "PATCH");
+        assert_eq!(method_label(&Method::DELETE), "DELETE");
+        assert_eq!(method_label(&Method::OPTIONS), "OPTIONS");
+        // An unlisted method falls through to the catch-all.
+        assert_eq!(method_label(&Method::TRACE), "OTHER");
+    }
+
+    /// The `Debug` impl renders the struct name (non-exhaustive). Pins the
+    /// custom `fmt` body so the `Ok(Default::default())` mutant — which
+    /// would emit an empty string — is killed.
+    #[test]
+    fn metrics_debug_renders_struct_name() {
+        let m = Metrics::new();
+        let s = format!("{m:?}");
+        assert!(s.contains("Metrics"), "debug output was: {s:?}");
+        assert!(!s.is_empty());
+    }
+
+    /// Every matched-route arm of `handler_for` maps to its own stable
+    /// label. Deleting any arm would fold that route into the path-prefix
+    /// fallback (or `"other"`), changing the emitted label — so each arm
+    /// is asserted with a matched path that does NOT fall back to the same
+    /// label by coincidence.
+    #[test]
+    fn handler_for_each_matched_arm_is_distinct() {
+        // The grouped index arm: all three index route shapes → "index".
+        assert_eq!(Metrics::handler_for(Some("/index/{*path}"), "x"), "index");
+        assert_eq!(Metrics::handler_for(Some("/{prefix}/{name}"), "x"), "index");
+        assert_eq!(Metrics::handler_for(Some("/{p0}/{p1}/{name}"), "x"), "index");
+        // git_index has its own arm; path "x" would otherwise be "other".
+        assert_eq!(
+            Metrics::handler_for(Some("/index.git/{*path}"), "x"),
+            "git_index"
+        );
+        assert_eq!(
+            Metrics::handler_for(Some("/api/v1/crates/{name}/{version}/yank"), "x"),
+            "yank"
+        );
+        assert_eq!(
+            Metrics::handler_for(Some("/api/v1/crates/{name}/{version}/unyank"), "x"),
+            "unyank"
+        );
+        assert_eq!(
+            Metrics::handler_for(Some("/api/v1/crates/{name}/owners"), "x"),
+            "owners"
+        );
+        assert_eq!(Metrics::handler_for(Some("/live"), "x"), "live");
+        assert_eq!(Metrics::handler_for(Some("/ready"), "x"), "ready");
+    }
 
     #[test]
     fn handler_for_classifies_known_routes() {

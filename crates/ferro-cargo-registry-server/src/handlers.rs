@@ -440,3 +440,25 @@ async fn mutate_owners(
 pub fn derive_index_path(name: &str) -> String {
     index_path(name)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::derive_index_path;
+    use crate::name::index_path;
+
+    /// `derive_index_path` is the thin re-export the handlers use; it must
+    /// return the real layout, not an empty / placeholder string. This
+    /// kills both the `String::new()` and the `"xyzzy".into()` return
+    /// mutants by pinning the actual layout for several name lengths.
+    #[test]
+    fn derive_index_path_matches_index_path_layout() {
+        for name in ["a", "ab", "abc", "serde", "MyCrate"] {
+            assert_eq!(derive_index_path(name), index_path(name));
+        }
+        // Concrete expected values so a constant-return mutant cannot
+        // survive even if `index_path` itself were also mutated.
+        assert_eq!(derive_index_path("serde"), "se/rd/serde");
+        assert_eq!(derive_index_path("a"), "1/a");
+        assert!(!derive_index_path("serde").is_empty());
+    }
+}

@@ -164,4 +164,49 @@ mod tests {
         };
         assert_eq!(e.status(), StatusCode::BAD_REQUEST);
     }
+
+    /// `storage_status` maps a blob-store `NotFound` to `404`. Deleting
+    /// that match arm would fold it into the catch-all `500`, so the
+    /// explicit assertion pins the mapping.
+    #[test]
+    fn storage_not_found_is_404() {
+        use ferro_blob_store::BlobStoreError;
+        let e = CargoError::Storage(BlobStoreError::NotFound("digest".into()));
+        assert_eq!(e.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// `storage_status` maps a blob-store digest mismatch to `400`.
+    /// Deleting that match arm would fold it into the catch-all `500`.
+    #[test]
+    fn storage_digest_mismatch_is_400() {
+        use ferro_blob_store::BlobStoreError;
+        let e = CargoError::Storage(BlobStoreError::DigestMismatch {
+            expected: "aa".into(),
+            computed: "bb".into(),
+        });
+        assert_eq!(e.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// `storage_status` maps an invalid-digest parse error to `400` (the
+    /// same arm as `DigestMismatch`). Deleting the arm regresses it to
+    /// `500`.
+    #[test]
+    fn storage_invalid_digest_is_400() {
+        use ferro_blob_store::{Digest, DigestAlgo};
+        // An odd-length / non-hex string is not a valid SHA-256 digest.
+        let parse_err = Digest::new(DigestAlgo::Sha256, "zz").unwrap_err();
+        let e = CargoError::Storage(parse_err.into());
+        assert_eq!(e.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// An I/O blob-store error falls through to the explicit `500` arm
+    /// (the "new variant forces a conscious classification" guard). This
+    /// distinguishes the catch-all from the 404 / 400 arms.
+    #[test]
+    fn storage_io_error_is_500() {
+        use ferro_blob_store::BlobStoreError;
+        let io = std::io::Error::other("disk on fire");
+        let e = CargoError::Storage(BlobStoreError::Io(io));
+        assert_eq!(e.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
 }

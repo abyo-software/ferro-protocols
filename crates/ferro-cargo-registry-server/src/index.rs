@@ -425,6 +425,43 @@ mod tests {
         );
     }
 
+    /// `default_features` defaults to `true` when the publish metadata
+    /// omits it (cargo's behaviour). This kills the `default_true → false`
+    /// mutant: a dep without an explicit `default_features` key must carry
+    /// `default_features: true` through to the index entry.
+    #[test]
+    fn dep_default_features_defaults_to_true() {
+        let manifest = json!({
+            "name": "consumer",
+            "vers": "1.0.0",
+            "deps": [{
+                "name": "serde",
+                "version_req": "^1"
+                // no `default_features` key — must default to true.
+            }],
+            "features": {}
+        });
+        let e = entry_from_manifest(&manifest, "00".repeat(32)).unwrap();
+        assert!(
+            e.deps[0].default_features,
+            "omitted default_features must default to true"
+        );
+        // An explicit `false` is still honoured (distinguishes the default
+        // from a hard-coded constant).
+        let manifest = json!({
+            "name": "consumer",
+            "vers": "1.0.0",
+            "deps": [{
+                "name": "serde",
+                "version_req": "^1",
+                "default_features": false
+            }],
+            "features": {}
+        });
+        let e = entry_from_manifest(&manifest, "00".repeat(32)).unwrap();
+        assert!(!e.deps[0].default_features, "explicit false honoured");
+    }
+
     /// F4 regression: a non-renamed dependency must NOT emit a `package`
     /// field, and its `version_req` still maps to `req`.
     #[test]

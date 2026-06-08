@@ -89,6 +89,7 @@ pub fn encode(manifest: &Value, tarball: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::{encode, parse};
+    use crate::error::CargoError;
     use serde_json::json;
 
     #[test]
@@ -137,5 +138,63 @@ mod tests {
         body.extend_from_slice(bad);
         body.extend_from_slice(&0u32.to_le_bytes());
         assert!(parse(&body).is_err());
+    }
+
+    /// Boundary for the metadata-length check (`rest.len() < metadata_len`):
+    /// a body whose remaining bytes EXACTLY equal `metadata_len` must NOT
+    /// be treated as a truncated metadata body — the metadata slice is read
+    /// in full and parsing then fails on the *missing `crate_len` prefix*.
+    /// The `< → <=` mutant would instead reject at the metadata check,
+    /// changing the error detail from "body too short for 4-byte length
+    /// prefix" to "metadata body truncated".
+    #[test]
+    fn exact_fit_metadata_consumes_whole_rest_then_fails_at_crate_len() {
+        let meta = b"{}";
+        let mut body = Vec::new();
+        body.extend_from_slice(&u32::try_from(meta.len()).unwrap().to_le_bytes());
+        body.extend_from_slice(meta); // rest.len() == metadata_len exactly.
+        let err = parse(&body).expect_err("missing crate_len prefix");
+        let CargoError::InvalidPublish(detail) = err else {
+            panic!("expected InvalidPublish, got {err:?}");
+        };
+        assert!(
+            detail.contains("4-byte length prefix"),
+            "metadata must be read in full, failing only at the absent \
+             crate_len prefix; got: {detail}"
+        );
+    }
+
+    /// A body whose metadata bytes are genuinely short of `metadata_len`
+    /// IS rejected at the metadata check — the lower side of the boundary.
+    #[test]
+    fn under_fit_metadata_is_truncated() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&10u32.to_le_bytes()); // metadata_len = 10
+        body.extend_from_slice(b"{}"); // only 2 bytes follow
+        let err = parse(&body).expect_err("truncated metadata");
+        let CargoError::InvalidPublish(detail) = err else {
+            panic!("expected InvalidPublish, got {err:?}");
+        };
+        assert!(detail.contains("metadata body truncated"), "got: {detail}");
+    }
+
+    /// Boundary for the 4-byte length-prefix check (`body.len() < 4`): a
+    /// body of EXACTLY 4 bytes is a complete length prefix and must be
+    /// read (here a `metadata_len` of 0). The `< → <=` mutant would reject a
+    /// 4-byte prefix as "too short".
+    #[test]
+    fn exact_four_byte_prefix_is_read_not_rejected() {
+        // metadata = "{}" (len 2), then the crate_len prefix is the LAST
+        // 4 bytes of the body — `read_u32_le` is handed exactly a 4-byte
+        // slice for crate_len = 0. The `< → <=` mutant (`body.len() < 4`
+        // → `<= 4`) would reject this exact 4-byte prefix as "too short".
+        let mut body = Vec::new();
+        body.extend_from_slice(&2u32.to_le_bytes()); // metadata_len = 2
+        body.extend_from_slice(b"{}");
+        body.extend_from_slice(&0u32.to_le_bytes()); // crate_len = 0 (last 4 bytes)
+        let p = parse(&body).expect("4-byte crate_len prefix must be read");
+        assert!(p.tarball.is_empty());
+        // A body shorter than 4 bytes is still rejected (lower side).
+        assert!(parse(&[0, 0, 0]).is_err());
     }
 }
