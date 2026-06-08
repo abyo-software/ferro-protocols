@@ -34,7 +34,7 @@ fn common_blob_headers(digest: &Digest, size: usize) -> HeaderMap {
     let mut headers = HeaderMap::new();
     let digest_str = digest.to_string();
     if let Ok(v) = HeaderValue::from_str(&digest_str) {
-        headers.insert("Docker-Content-Digest", v.clone());
+        headers.insert("Docker-Content-Digest", v);
         // ETag: quoted digest, matches Docker Registry convention.
         if let Ok(etag) = HeaderValue::from_str(&format!("\"{digest_str}\"")) {
             headers.insert(header::ETAG, etag);

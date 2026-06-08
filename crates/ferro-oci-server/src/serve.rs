@@ -83,19 +83,14 @@ impl Config {
     /// Returns an error when a filesystem store is requested but its
     /// directory cannot be created or opened.
     pub fn blob_store(&self) -> Result<SharedBlobStore, Box<dyn std::error::Error>> {
-        match &self.storage_dir {
-            Some(dir) => {
-                std::fs::create_dir_all(dir)?;
-                let store = FsBlobStore::new(dir.clone())?;
-                tracing::info!(path = %dir.display(), "using filesystem blob store");
-                Ok(Arc::new(store))
-            }
-            None => {
-                tracing::warn!(
-                    "FERRO_OCI_STORAGE_DIR unset — using a non-durable in-memory blob store"
-                );
-                Ok(Arc::new(InMemoryBlobStore::new()))
-            }
+        if let Some(dir) = &self.storage_dir {
+            std::fs::create_dir_all(dir)?;
+            let store = FsBlobStore::new(dir.clone())?;
+            tracing::info!(path = %dir.display(), "using filesystem blob store");
+            Ok(Arc::new(store))
+        } else {
+            tracing::warn!("FERRO_OCI_STORAGE_DIR unset — using a non-durable in-memory blob store");
+            Ok(Arc::new(InMemoryBlobStore::new()))
         }
     }
 }

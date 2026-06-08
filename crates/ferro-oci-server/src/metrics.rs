@@ -272,7 +272,7 @@ pub async fn track_metrics(
 }
 
 /// Map a [`Method`] to a stable static label, defaulting to `"OTHER"`.
-fn method_label(method: &Method) -> &'static str {
+const fn method_label(method: &Method) -> &'static str {
     match *method {
         Method::GET => "GET",
         Method::HEAD => "HEAD",

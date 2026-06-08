@@ -161,7 +161,7 @@ impl Reference {
 
     /// Borrow the tag string, if this reference is one.
     #[must_use]
-    pub fn as_tag(&self) -> Option<&str> {
+    pub const fn as_tag(&self) -> Option<&str> {
         match self {
             Self::Tag(t) => Some(t.as_str()),
             Self::Digest(_) => None,

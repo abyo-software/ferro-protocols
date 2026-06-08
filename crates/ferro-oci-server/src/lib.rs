@@ -2,7 +2,7 @@
 //! `ferro-oci-server`
 //!
 //! OCI Distribution Spec v1.1 (`opencontainers/distribution-spec`) and
-//! Docker Registry HTTP API v2 (`docker/distribution`) for FerroRepo.
+//! Docker Registry HTTP API v2 (`docker/distribution`) for `FerroRepo`.
 //!
 //! Phase 1 scope (wired in this crate):
 //!

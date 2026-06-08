@@ -266,7 +266,7 @@ pub mod dispatch {
         None
     }
 
-    /// Decode the rest into (name, suffix) or return NAME_INVALID.
+    /// Decode the rest into (name, suffix) or return `NAME_INVALID`.
     fn decode(rest: &str) -> Result<(String, String), OciError> {
         let (name, suffix) = split_rest(rest).ok_or_else(|| {
             OciError::new(OciErrorCode::NameUnknown, format!("cannot route `{rest}`"))

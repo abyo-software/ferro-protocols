@@ -73,7 +73,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             annotations: None,
             artifact_type: None,
             platform: None,
-            extra: Default::default(),
+            extra: std::collections::BTreeMap::new(),
         },
         layers: vec![Descriptor {
             media_type: "application/vnd.oci.image.layer.v1.tar+gzip".into(),
@@ -83,12 +83,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             annotations: None,
             artifact_type: None,
             platform: None,
-            extra: Default::default(),
+            extra: std::collections::BTreeMap::new(),
         }],
         subject: None,
         artifact_type: None,
         annotations: None,
-        extra: Default::default(),
+        extra: std::collections::BTreeMap::new(),
     };
 
     let json = serde_json::to_string_pretty(&manifest)?;

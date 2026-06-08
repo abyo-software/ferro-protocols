@@ -11,7 +11,7 @@
 //!
 //! Phase 1 ships [`InMemoryRegistryMeta`], which uses
 //! `parking_lot::RwLock` to guard a handful of `BTreeMap`s. A
-//! SQLite- / Postgres-backed impl lands in Phase 2.
+//! `SQLite`- / `Postgres`-backed impl lands in Phase 2.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -190,6 +190,7 @@ impl RegistryMeta for InMemoryRegistryMeta {
                 .or_default()
                 .insert(tag.clone(), digest.to_string());
         }
+        drop(guard);
         Ok(())
     }
 
@@ -209,13 +210,14 @@ impl RegistryMeta for InMemoryRegistryMeta {
                 None => return Ok(None),
             },
         };
-        let Some((media_type, body)) = name_map.get(&digest_str) else {
+        let Some((media_type, body)) = name_map.get(&digest_str).cloned() else {
             return Ok(None);
         };
+        drop(guard);
         let digest: Digest = digest_str
             .parse()
             .map_err(ferro_blob_store::BlobStoreError::InvalidDigest)?;
-        Ok(Some((digest, media_type.clone(), body.clone())))
+        Ok(Some((digest, media_type, body)))
     }
 
     async fn delete_manifest(&self, name: &str, reference: &Reference) -> Result<bool> {
@@ -230,6 +232,7 @@ impl RegistryMeta for InMemoryRegistryMeta {
                 if removed && let Some(tag_map) = guard.tags.get_mut(name) {
                     tag_map.retain(|_, v| v != &digest_str);
                 }
+                drop(guard);
                 Ok(removed)
             }
             Reference::Tag(_) => Ok(false),
@@ -247,6 +250,7 @@ impl RegistryMeta for InMemoryRegistryMeta {
             return Ok(Vec::new());
         };
         let mut names: Vec<String> = tag_map.keys().cloned().collect();
+        drop(guard);
         names.sort();
         if let Some(cursor) = last {
             names.retain(|t| t.as_str() > cursor);
@@ -260,6 +264,7 @@ impl RegistryMeta for InMemoryRegistryMeta {
     async fn list_repositories(&self, last: Option<&str>, n: Option<usize>) -> Result<Vec<String>> {
         let guard = self.inner.read();
         let mut names: Vec<String> = guard.manifests.keys().cloned().collect();
+        drop(guard);
         names.sort();
         if let Some(cursor) = last {
             names.retain(|t| t.as_str() > cursor);
@@ -277,6 +282,7 @@ impl RegistryMeta for InMemoryRegistryMeta {
             (name.to_owned(), uuid.clone()),
             UploadState::new(name, uuid.clone()),
         );
+        drop(guard);
         Ok(uuid)
     }
 
@@ -302,13 +308,16 @@ impl RegistryMeta for InMemoryRegistryMeta {
                 state.offset()
             )));
         }
-        Ok(state.append(&chunk))
+        let new_offset = state.append(&chunk);
+        drop(guard);
+        Ok(new_offset)
     }
 
     async fn complete_upload(&self, name: &str, uuid: &str, _digest: &Digest) -> Result<()> {
         let mut guard = self.inner.write();
         let key = (name.to_owned(), uuid.to_owned());
         guard.uploads.remove(&key);
+        drop(guard);
         Ok(())
     }
 
@@ -337,14 +346,16 @@ impl RegistryMeta for InMemoryRegistryMeta {
         let Some(list) = name_map.get(&digest.to_string()) else {
             return Ok(Vec::new());
         };
-        let out = match artifact_type {
-            Some(at) => list
-                .iter()
-                .filter(|d| d.artifact_type.as_deref() == Some(at))
-                .cloned()
-                .collect(),
-            None => list.clone(),
-        };
+        let out = artifact_type.map_or_else(
+            || list.clone(),
+            |at| {
+                list.iter()
+                    .filter(|d| d.artifact_type.as_deref() == Some(at))
+                    .cloned()
+                    .collect()
+            },
+        );
+        drop(guard);
         Ok(out)
     }
 
@@ -368,6 +379,7 @@ impl RegistryMeta for InMemoryRegistryMeta {
             .entry(subject.to_string())
             .or_default()
             .push(descriptor);
+        drop(guard);
         Ok(())
     }
 }

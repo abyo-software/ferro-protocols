@@ -344,12 +344,64 @@ pub async fn put_manifest(
         .into_response();
     }
 
-    // Register any referrer (subject field).
-    let subject_digest = parsed
+    let body_len = body.len() as u64;
+    if let Err(e) = state
+        .registry
+        .put_manifest(name, &reference, &digest, &content_type, body.clone())
+        .await
+    {
+        return OciError::from(e).into_response();
+    }
+
+    if let Err(e) = register_referrer_if_any(state, name, &parsed, &digest, &content_type, body_len)
+        .await
+    {
+        return e.into_response();
+    }
+
+    let mut out = HeaderMap::new();
+    let location = format!("/v2/{name}/manifests/{digest}");
+    if let Ok(v) = HeaderValue::from_str(&location) {
+        out.insert(header::LOCATION, v);
+    }
+    if let Ok(v) = HeaderValue::from_str(&digest.to_string()) {
+        out.insert("Docker-Content-Digest", v);
+    }
+    // Per §3.3 the server MUST surface the subject header on manifests
+    // that have one so clients can discover the referrers list.
+    if let Some(subj) = parsed
         .get("subject")
         .and_then(|s| s.get("digest"))
         .and_then(Value::as_str)
-        .and_then(|s| s.parse::<Digest>().ok());
+        && let Ok(v) = HeaderValue::from_str(subj)
+    {
+        out.insert("OCI-Subject", v);
+    }
+    out.insert(header::CONTENT_LENGTH, HeaderValue::from(0u64));
+    (StatusCode::CREATED, out).into_response()
+}
+
+/// Register a referrer if the manifest declares a `subject`.
+///
+/// No-op (returns `Ok`) when the manifest has no parseable subject
+/// digest.
+async fn register_referrer_if_any(
+    state: &AppState,
+    name: &str,
+    parsed: &Value,
+    digest: &Digest,
+    content_type: &str,
+    body_len: u64,
+) -> Result<(), OciError> {
+    let Some(subj) = parsed
+        .get("subject")
+        .and_then(|s| s.get("digest"))
+        .and_then(Value::as_str)
+        .and_then(|s| s.parse::<Digest>().ok())
+    else {
+        return Ok(());
+    };
+
     // OCI Image Spec v1.1: the referrers descriptor's `artifactType`
     // is the manifest's top-level `artifactType`, or — when that is
     // empty/absent — a fallback to the manifest's `config.mediaType`.
@@ -377,51 +429,18 @@ pub async fn put_manifest(
                 .collect::<std::collections::BTreeMap<_, _>>()
         });
 
-    if let Err(e) = state
+    let descriptor = ReferrerDescriptor {
+        media_type: content_type.to_owned(),
+        digest: digest.clone(),
+        size: body_len,
+        artifact_type,
+        annotations,
+    };
+    state
         .registry
-        .put_manifest(name, &reference, &digest, &content_type, body.clone())
+        .register_referrer(name, &subj, descriptor)
         .await
-    {
-        return OciError::from(e).into_response();
-    }
-
-    if let Some(subj) = subject_digest {
-        let descriptor = ReferrerDescriptor {
-            media_type: content_type.clone(),
-            digest: digest.clone(),
-            size: body.len() as u64,
-            artifact_type,
-            annotations,
-        };
-        if let Err(e) = state
-            .registry
-            .register_referrer(name, &subj, descriptor)
-            .await
-        {
-            return OciError::from(e).into_response();
-        }
-    }
-
-    let mut out = HeaderMap::new();
-    let location = format!("/v2/{name}/manifests/{digest}");
-    if let Ok(v) = HeaderValue::from_str(&location) {
-        out.insert(header::LOCATION, v);
-    }
-    if let Ok(v) = HeaderValue::from_str(&digest.to_string()) {
-        out.insert("Docker-Content-Digest", v);
-    }
-    // Per §3.3 the server MUST surface the subject header on manifests
-    // that have one so clients can discover the referrers list.
-    if let Some(subj) = parsed
-        .get("subject")
-        .and_then(|s| s.get("digest"))
-        .and_then(Value::as_str)
-        && let Ok(v) = HeaderValue::from_str(subj)
-    {
-        out.insert("OCI-Subject", v);
-    }
-    out.insert(header::CONTENT_LENGTH, HeaderValue::from(0u64));
-    (StatusCode::CREATED, out).into_response()
+        .map_err(OciError::from)
 }
 
 /// Handle `DELETE /v2/{name}/manifests/{reference}`.

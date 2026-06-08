@@ -170,7 +170,7 @@ impl OciError {
 
     /// Override the HTTP status independent of the error code's default.
     #[must_use]
-    pub fn with_status(mut self, status: StatusCode) -> Self {
+    pub const fn with_status(mut self, status: StatusCode) -> Self {
         self.status_override = Some(status);
         self
     }
@@ -219,7 +219,6 @@ impl From<ferro_blob_store::BlobStoreError> for OciError {
             B::DigestMismatch { .. } | B::InvalidDigest(_) => {
                 Self::new(OciErrorCode::DigestInvalid, msg)
             }
-            B::Io(_) => Self::new(OciErrorCode::Unsupported, msg),
             _ => Self::new(OciErrorCode::Unsupported, msg),
         }
     }
