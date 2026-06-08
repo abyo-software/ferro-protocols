@@ -267,15 +267,29 @@ pub async fn handle_publish(
     // client knows the crate was not durably stored.
     if let Err(err) = state.persist_locked(&crates) {
         rollback_publish(&mut crates, &key, &vers_key, &digest);
-        drop(crates);
-        // Best-effort orphan-blob cleanup. A content-addressed blob may be
-        // shared with another version (identical bytes); only delete it
-        // when no remaining mapping references this digest.
-        if !digest_still_referenced(&state, &digest).await
+        // R4-3: the orphan-blob cleanup decision AND the delete must be one
+        // critical section with respect to other publishes, otherwise there
+        // is a TOCTOU race: a concurrent successful publish of an identical
+        // tarball (same content-addressed `digest`) could commit its mapping
+        // between an unsynchronised "is it referenced?" check and the delete,
+        // and this rollback would then delete a now-referenced blob,
+        // corrupting that other crate's download.
+        //
+        // We therefore keep holding the SAME write guard (`crates`) that
+        // serializes all publishes while we (a) check whether any surviving
+        // version still references the digest and (b) delete it. No other
+        // publish can acquire the write lock to insert a reference in this
+        // window, so the "unreferenced → delete" decision cannot be
+        // invalidated before the delete completes. Holding the guard across
+        // the `delete().await` is deadlock-safe: the blob store delete is a
+        // self-contained filesystem op that never re-acquires the crates
+        // lock.
+        if !digest_referenced_in(&crates, &digest)
             && let Err(del_err) = state.blobs.delete(&digest).await
         {
             tracing::error!(%del_err, "failed to delete orphan blob after persist rollback");
         }
+        drop(crates);
         return Err(CargoError::Persistence(err.to_string()));
     }
     drop(crates);
@@ -321,13 +335,22 @@ fn rollback_publish(
     }
 }
 
-/// Whether any crate still maps a version to `digest`.
+/// Whether any crate in `crates` still maps a version to `digest`.
 ///
 /// Used after a publish rollback to decide if the just-written tarball
 /// blob is now an orphan (safe to delete) or is shared with another,
-/// surviving version (must be kept). Takes the read lock briefly.
-async fn digest_still_referenced(state: &CargoState, digest: &Digest) -> bool {
-    let crates = state.crates.read().await;
+/// surviving version (must be kept).
+///
+/// R4-3: this is a *synchronous* scan over an already-held guard, never a
+/// fresh lock acquisition. The caller must invoke it while still holding
+/// the publish write guard and must perform the blob delete before
+/// releasing that guard, so the unreferenced-decision and the delete form
+/// a single critical section that no concurrent publish can interleave a
+/// reference insertion into.
+fn digest_referenced_in(
+    crates: &std::collections::BTreeMap<String, CrateRecord>,
+    digest: &Digest,
+) -> bool {
     crates
         .values()
         .any(|rec| rec.tarballs.values().any(|d| d == digest))
@@ -526,13 +549,15 @@ mod tests {
     use std::sync::Arc;
 
     use ferro_blob_store::{Digest, FsBlobStore};
+    use serde_json::json;
     use tokio::sync::RwLock;
 
-    use super::{derive_index_path, mutate_owners, set_yanked};
+    use super::{derive_index_path, handle_publish, mutate_owners, set_yanked};
     use crate::config::IndexConfig;
     use crate::index::IndexEntry;
     use crate::name::{canonical_name, index_path};
     use crate::owners::Owner;
+    use crate::publish::encode;
     use crate::router::{CargoState, CrateRecord};
 
     /// `derive_index_path` is the thin re-export the handlers use; it must
@@ -675,5 +700,135 @@ mod tests {
             crates[&canonical_name("foo")].entries[0].yanked
         };
         assert!(yanked);
+    }
+
+    /// R4-3: the publish persist-failure rollback must NOT delete a blob
+    /// that another, already-published crate version still references by the
+    /// same content-addressed digest.
+    ///
+    /// Scenario (the invariant form of the TOCTOU race): crate `bee` is
+    /// already published successfully and its version `1.0.0` maps to digest
+    /// `D` (the blob `D` exists on disk). Then crate `aye` is published with
+    /// the **same tarball bytes** — so the same digest `D` — but its durable
+    /// snapshot write fails (broken persistence dir), forcing the rollback
+    /// path. The rollback must roll `aye` back AND it must observe that `D`
+    /// is still referenced by `bee@1.0.0`, so it must leave the blob in
+    /// place. If the orphan check and delete were not one critical section
+    /// (the pre-fix code dropped the write lock first), this is exactly the
+    /// shared-digest blob a concurrent/sequenced rollback could wrongly
+    /// delete, corrupting `bee`'s download.
+    #[tokio::test]
+    async fn publish_rollback_keeps_blob_referenced_by_other_crate() {
+        use axum::extract::State;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let tarball = b"shared-tarball-bytes-for-digest-D".to_vec();
+        let digest = Digest::sha256_of(&tarball);
+
+        // Seed crate `bee@1.0.0` already mapped to digest D, and put the
+        // blob on disk so a download of it can succeed.
+        let mut bee_tarballs = BTreeMap::new();
+        bee_tarballs.insert("1.0.0".to_owned(), digest.clone());
+        let bee = CrateRecord {
+            entries: vec![IndexEntry {
+                name: "bee".into(),
+                vers: "1.0.0".into(),
+                deps: vec![],
+                cksum: digest.hex().to_owned(),
+                features: BTreeMap::new(),
+                yanked: false,
+                links: None,
+                v: Some(2),
+                features2: None,
+                rust_version: None,
+            }],
+            tarballs: bee_tarballs,
+            owners: vec![],
+        };
+
+        let state = state_with_seed_and_broken_persistence(&tmp, &canonical_name("bee"), bee);
+        state
+            .blobs
+            .put(&digest, axum::body::Bytes::from(tarball.clone()))
+            .await
+            .expect("seed blob D on disk");
+
+        // Publish `aye@2.0.0` with the SAME tarball bytes (→ same digest D).
+        // Persistence is broken, so this must hit the rollback path.
+        let manifest = json!({ "name": "aye", "vers": "2.0.0" });
+        let body = axum::body::Bytes::from(encode(&manifest, &tarball));
+        let err = handle_publish(State(state.clone()), body)
+            .await
+            .expect_err("broken persistence must fail the publish");
+        assert_eq!(err.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+
+        // `aye` must be fully rolled back: no record for it. `bee` must
+        // still reference D.
+        let crates = state.crates.read().await;
+        let aye_present = crates.contains_key(&canonical_name("aye"));
+        let bee_maps_d = crates[&canonical_name("bee")].tarballs.get("1.0.0") == Some(&digest);
+        drop(crates);
+        assert!(
+            !aye_present,
+            "failed publish of aye must leave no in-memory record"
+        );
+        assert!(
+            bee_maps_d,
+            "bee must still map 1.0.0 → D after aye's rollback"
+        );
+
+        // The core invariant: the shared blob D must NOT have been deleted —
+        // `bee`'s download still works.
+        let bytes = state
+            .blobs
+            .get(&digest)
+            .await
+            .expect("shared blob D must survive aye's rollback");
+        assert_eq!(
+            bytes.as_ref(),
+            tarball.as_slice(),
+            "blob D content must be intact"
+        );
+    }
+
+    /// R4-3 companion: when the rolled-back publish's blob is a genuine
+    /// orphan — no surviving version references it — the rollback still
+    /// deletes it, so a persist failure does not leak an orphan blob.
+    #[tokio::test]
+    async fn publish_rollback_deletes_truly_orphan_blob() {
+        use axum::extract::State;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let tarball = b"unique-orphan-tarball-bytes".to_vec();
+        let digest = Digest::sha256_of(&tarball);
+
+        // Empty seed crate just to give the broken-persistence state a map;
+        // it does NOT reference `digest`.
+        let state = state_with_seed_and_broken_persistence(
+            &tmp,
+            &canonical_name("other"),
+            CrateRecord {
+                entries: vec![seed_entry("9.9.9", false)],
+                tarballs: BTreeMap::new(),
+                owners: vec![],
+            },
+        );
+
+        let manifest = json!({ "name": "lonely", "vers": "1.0.0" });
+        let body = axum::body::Bytes::from(encode(&manifest, &tarball));
+        let err = handle_publish(State(state.clone()), body)
+            .await
+            .expect_err("broken persistence must fail the publish");
+        assert_eq!(
+            err.status(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+
+        // No surviving version references D → the just-written blob is an
+        // orphan and must have been deleted.
+        assert!(
+            !state.blobs.contains(&digest).await.unwrap(),
+            "an orphan blob must be deleted by the rollback"
+        );
     }
 }
