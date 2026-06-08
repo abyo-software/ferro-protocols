@@ -25,7 +25,37 @@ pub struct AppState {
     pub registry: Arc<dyn RegistryMeta>,
 }
 
+impl AppState {
+    /// Construct shared handler state from a blob store and a
+    /// registry-metadata plane, wrapped in an [`Arc`] ready to hand to
+    /// [`router`].
+    ///
+    /// ```no_run
+    /// use std::sync::Arc;
+    /// use ferro_blob_store::InMemoryBlobStore;
+    /// use ferro_oci_server::{AppState, InMemoryRegistryMeta, router};
+    ///
+    /// let state = AppState::new(
+    ///     Arc::new(InMemoryBlobStore::new()),
+    ///     Arc::new(InMemoryRegistryMeta::new()),
+    /// );
+    /// let app = router(state);
+    /// ```
+    #[must_use]
+    pub fn new(blob_store: SharedBlobStore, registry: Arc<dyn RegistryMeta>) -> Arc<Self> {
+        Arc::new(Self {
+            blob_store,
+            registry,
+        })
+    }
+}
+
 /// Build the Axum router for every `/v2/**` OCI endpoint.
+///
+/// This router covers only the OCI Distribution Spec surface. To add
+/// Kubernetes liveness / readiness probes (`/live`, `/healthz`,
+/// `/ready`), merge [`probe_routes`] into the returned router with
+/// [`Router::merge`].
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         // Version / auth challenge.
@@ -44,6 +74,46 @@ pub fn router(state: Arc<AppState>) -> Router {
                 .put(dispatch::dispatch_put_inner),
         )
         .with_state(state)
+}
+
+/// Build a stateless router exposing Kubernetes-style health probes.
+///
+/// Routes:
+///
+/// - `GET /live` — liveness; returns `200 OK` with body `OK` as long as
+///   the process is running and able to serve requests.
+/// - `GET /healthz` — health; returns `200 OK` with JSON
+///   `{"status":"ok"}`.
+/// - `GET /ready` — readiness; returns `200 OK` with body `OK`. The
+///   in-memory metadata plane and blob store are ready as soon as the
+///   process is up, so this mirrors liveness today; a persistent backend
+///   would gate this on a successful storage ping.
+///
+/// Merge into the OCI router at boot:
+///
+/// ```no_run
+/// use std::sync::Arc;
+/// use ferro_blob_store::InMemoryBlobStore;
+/// use ferro_oci_server::{AppState, InMemoryRegistryMeta, probe_routes, router};
+///
+/// let state = AppState::new(
+///     Arc::new(InMemoryBlobStore::new()),
+///     Arc::new(InMemoryRegistryMeta::new()),
+/// );
+/// let app = router(state).merge(probe_routes());
+/// ```
+pub fn probe_routes() -> Router {
+    use axum::Json;
+    use axum::http::StatusCode;
+    use serde_json::json;
+
+    Router::new()
+        .route("/live", get(|| async { (StatusCode::OK, "OK") }))
+        .route(
+            "/healthz",
+            get(|| async { (StatusCode::OK, Json(json!({ "status": "ok" }))) }),
+        )
+        .route("/ready", get(|| async { (StatusCode::OK, "OK") }))
 }
 
 /// Small axum-aware dispatch layer.

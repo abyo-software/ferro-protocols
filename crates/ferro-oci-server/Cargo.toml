@@ -15,9 +15,9 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-ferro-blob-store = { version = "0.1", path = "../ferro-blob-store", features = ["serde"] }
+ferro-blob-store = { version = "0.1", path = "../ferro-blob-store", features = ["serde", "fs"] }
 axum = "0.8"
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["sync", "rt-multi-thread", "macros", "net", "signal"] }
 bytes = "1"
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
@@ -29,7 +29,12 @@ uuid = { version = "1", features = ["v4"] }
 http = "1"
 futures = "0.3"
 tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 parking_lot = "0.12"
+
+[[bin]]
+name = "ferro-oci-server"
+path = "src/bin/ferro-oci-server.rs"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }

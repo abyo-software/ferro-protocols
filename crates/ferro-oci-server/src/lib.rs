@@ -20,6 +20,51 @@
 //! The Phase 1 exit gate is 100 % pass on the
 //! `opencontainers/distribution-spec` conformance suite and interop
 //! with `docker`, `podman`, `crane`, `skopeo`, and `nerdctl`.
+//!
+//! # Quick start
+//!
+//! Build an [`AppState`] from a blob store and a metadata plane, hand
+//! it to [`router()`], optionally merge in the Kubernetes health probes
+//! from [`probe_routes`], and serve it with `axum`:
+//!
+//! ```no_run
+//! use std::sync::Arc;
+//!
+//! use ferro_blob_store::InMemoryBlobStore;
+//! use ferro_oci_server::{AppState, InMemoryRegistryMeta, probe_routes, router};
+//!
+//! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+//! let state = AppState::new(
+//!     Arc::new(InMemoryBlobStore::new()),
+//!     Arc::new(InMemoryRegistryMeta::new()),
+//! );
+//! let app = router(state).merge(probe_routes());
+//! let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
+//! axum::serve(listener, app).await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! After that, `docker push localhost:8080/myimage:latest` (or
+//! `podman` / `crane` / `skopeo`) works against the running server.
+//!
+//! # Integration story
+//!
+//! - **Storage** — blob bytes live behind
+//!   [`ferro_blob_store::BlobStore`] (use the bundled
+//!   [`ferro_blob_store::FsBlobStore`] for a filesystem registry or
+//!   [`ferro_blob_store::InMemoryBlobStore`] for tests). Metadata
+//!   (manifests, tags, upload sessions, referrers) lives behind the
+//!   [`RegistryMeta`] trait; [`InMemoryRegistryMeta`] ships as the
+//!   single-node reference impl, and you can supply a
+//!   SQLite/Postgres-backed impl of your own.
+//! - **Auth** — handlers are open by design. Layer authentication and
+//!   authorization as `tower` middleware *above* the [`router()`].
+//! - **Deployment** — a runnable `ferro-oci-server` binary ships with
+//!   this crate (see `src/bin/ferro-oci-server.rs`); it reads
+//!   `FERRO_OCI_LISTEN` and `FERRO_OCI_STORAGE_DIR` from the
+//!   environment, exposes the `/live`, `/healthz`, and `/ready` probes,
+//!   and shuts down gracefully on `SIGTERM`/`SIGINT`.
 
 pub mod error;
 pub mod handlers;
@@ -35,7 +80,7 @@ pub use manifest::{Descriptor, ImageIndex, ImageManifest, empty_image_index};
 pub use media_types::{ManifestKind, classify_manifest_media_type};
 pub use reference::{MAX_NAME_LENGTH, MAX_TAG_LENGTH, Reference, validate_name};
 pub use registry::{InMemoryRegistryMeta, ReferrerDescriptor, RegistryMeta};
-pub use router::{AppState, router};
+pub use router::{AppState, probe_routes, router};
 pub use upload::{ContentRange, UploadState};
 
 /// Crate name, exposed for diagnostics and `/metrics` labelling.
