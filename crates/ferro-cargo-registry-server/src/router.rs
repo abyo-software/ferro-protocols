@@ -23,6 +23,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::routing::{delete, get, put};
 use ferro_blob_store::BlobStore;
 use ferro_blob_store::Digest;
@@ -36,6 +37,18 @@ use crate::handlers::{
 };
 use crate::index::IndexEntry;
 use crate::owners::Owner;
+
+/// Maximum publish request body size, in bytes (20 MiB).
+///
+/// Axum's default extractor body limit is 2 MiB, which silently rejects
+/// any `.crate` upload larger than that with `413 Payload Too Large`
+/// before the publish handler runs. Cargo's publish pre-image carries
+/// the JSON metadata *plus* the entire `.crate` tarball, and real crates
+/// routinely exceed 2 MiB (crates.io permits ~10 MiB tarballs), so the
+/// publish route installs an explicit, larger limit. 20 MiB leaves
+/// generous headroom over crates.io's documented crate-size cap while
+/// still bounding memory per request.
+pub const MAX_PUBLISH_BODY_BYTES: usize = 20 * 1024 * 1024;
 
 /// Per-crate state.
 #[derive(Debug, Clone, Default)]
@@ -77,7 +90,10 @@ pub fn router(state: CargoState) -> Router {
         .route("/config.json", get(handle_config_json))
         .route("/index/{*path}", get(handle_sparse_index))
         .route("/index.git/{*path}", get(handle_git_index_stub))
-        .route("/api/v1/crates/new", put(handle_publish))
+        .route(
+            "/api/v1/crates/new",
+            put(handle_publish).layer(DefaultBodyLimit::max(MAX_PUBLISH_BODY_BYTES)),
+        )
         .route(
             "/api/v1/crates/{name}/{version}/download",
             get(handle_download),
@@ -96,4 +112,43 @@ pub fn router(state: CargoState) -> Router {
         .route("/{prefix}/{name}", get(handle_sparse_index_root2))
         .route("/{p0}/{p1}/{name}", get(handle_sparse_index_root3))
         .with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use axum::body::Body;
+    use axum::http::{Method, Request, StatusCode};
+    use ferro_blob_store::FsBlobStore;
+    use tower::ServiceExt;
+
+    use super::{CargoState, MAX_PUBLISH_BODY_BYTES, router};
+
+    #[test]
+    fn publish_body_limit_is_documented_size() {
+        assert_eq!(MAX_PUBLISH_BODY_BYTES, 20 * 1024 * 1024);
+    }
+
+    /// The publish body limit is finite — a body past the configured cap
+    /// is rejected with `413`, proving F3 raised (not removed) the limit.
+    #[tokio::test]
+    async fn publish_over_configured_limit_is_413() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let store = Arc::new(FsBlobStore::new(tmp.path()).expect("blob store"));
+        let app = router(CargoState::new(store, "http://localhost"));
+
+        let oversized = vec![0u8; MAX_PUBLISH_BODY_BYTES + 4096];
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/api/v1/crates/new")
+                    .body(Body::from(oversized))
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
 }

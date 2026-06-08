@@ -88,7 +88,7 @@ pub use name::{
 };
 pub use owners::{Owner, OwnersMutationResponse, OwnersRequest, OwnersResponse};
 pub use publish::{PublishRequest, encode as encode_publish_body, parse as parse_publish_body};
-pub use router::{CargoState, CrateRecord, router};
+pub use router::{CargoState, CrateRecord, MAX_PUBLISH_BODY_BYTES, router};
 pub use serve::{Config, build_app, build_state, init_tracing, probe_routes, serve};
 pub use version::is_valid_semver;
 pub use yank::YankResponse;

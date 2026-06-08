@@ -353,6 +353,48 @@ async fn unknown_crate_download_404() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
+/// F3 regression: a publish whose `.crate` tarball pushes the request
+/// body over Axum's 2 MiB default extractor limit must still succeed —
+/// the router sets an explicit, larger `DefaultBodyLimit` on the publish
+/// route. Without the fix the request is rejected (413) before the
+/// handler runs.
+#[tokio::test]
+async fn publish_over_two_mib_succeeds() {
+    let (app, _tmp) = setup();
+    // 3 MiB tarball — comfortably over the 2 MiB Axum default.
+    let tarball = vec![0xABu8; 3 * 1024 * 1024];
+    let body = publish_body("bigcrate", "1.0.0", &tarball);
+    assert!(body.len() > 2 * 1024 * 1024);
+    let resp = send(
+        &app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri("/api/v1/crates/new")
+            .body(Body::from(body))
+            .expect("build"),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "publish over 2 MiB must not be rejected by the body limit"
+    );
+
+    // And the tarball round-trips intact.
+    let resp = send(
+        &app,
+        Request::builder()
+            .method(Method::GET)
+            .uri("/api/v1/crates/bigcrate/1.0.0/download")
+            .body(Body::empty())
+            .expect("build"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let got = to_bytes(resp.into_body(), 8 * 1024 * 1024).await.expect("body");
+    assert_eq!(got.len(), tarball.len());
+}
+
 /// F5 regression (a): publishing a mixed-case crate (`MyCrate`) must be
 /// retrievable at the lowercase sparse-index path cargo requests
 /// (`my/cr/mycrate`), and the index line must preserve the display case.
