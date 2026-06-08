@@ -88,11 +88,46 @@ impl Config {
     ///
     /// Uses the explicit `FERRO_CARGO_REGISTRY_API` value when set,
     /// otherwise derives `http://<addr>` from the bound socket address.
+    ///
+    /// Prefer [`resolve_api_host_checked`](Self::resolve_api_host_checked),
+    /// which refuses to advertise an unusable wildcard / port-0 origin;
+    /// this infallible variant is kept for callers (and tests) that have
+    /// already validated the address.
     #[must_use]
     pub fn resolve_api_host(&self, addr: SocketAddr) -> String {
         self.api_host
             .clone()
             .unwrap_or_else(|| format!("http://{addr}"))
+    }
+
+    /// Resolve the advertised API host, refusing to advertise an origin a
+    /// remote cargo client cannot reach.
+    ///
+    /// An explicit `FERRO_CARGO_REGISTRY_API` value is always honoured.
+    /// Otherwise the origin is derived from the bound socket address — but
+    /// a wildcard listen host (`0.0.0.0` / `::`) or an ephemeral port `0`
+    /// would advertise `http://0.0.0.0:8081/...` (or a `:0` port) in
+    /// `config.json`, which no remote client can fetch from. In that case
+    /// this returns an error instructing the operator to set
+    /// `FERRO_CARGO_REGISTRY_API` to the externally reachable origin.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string when the listen address is a wildcard host
+    /// or port `0` and no explicit `FERRO_CARGO_REGISTRY_API` is set.
+    pub fn resolve_api_host_checked(&self, addr: SocketAddr) -> Result<String, String> {
+        if let Some(explicit) = &self.api_host {
+            return Ok(explicit.clone());
+        }
+        if addr.ip().is_unspecified() || addr.port() == 0 {
+            return Err(format!(
+                "cannot advertise a usable registry origin: the listen address {addr} is a \
+                 wildcard host or port 0, which remote cargo clients cannot fetch from. Set \
+                 {ENV_API} to the externally reachable origin (for example \
+                 `http://registry.example:8081`)."
+            ));
+        }
+        Ok(format!("http://{addr}"))
     }
 }
 
@@ -158,7 +193,7 @@ async fn healthz() -> impl IntoResponse {
 /// bound, or the server loop fails.
 pub async fn serve(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
     let addr = config.socket_addr()?;
-    let api_host = config.resolve_api_host(addr);
+    let api_host = config.resolve_api_host_checked(addr)?;
     let state = build_state(&config.data_dir, api_host.clone())?;
     let app = build_app(state);
 
@@ -312,6 +347,84 @@ mod tests {
             api_host: None,
         };
         assert_eq!(derived.resolve_api_host(addr), "http://127.0.0.1:9000");
+    }
+
+    /// R2-9: a wildcard listen host (`0.0.0.0`) with no explicit API host
+    /// must NOT advertise a wildcard origin — the checked resolver errors
+    /// out so `config.json` never carries an unfetchable `0.0.0.0` origin.
+    #[test]
+    fn resolve_api_host_checked_rejects_wildcard_without_explicit_api() {
+        let cfg = Config {
+            data_dir: PathBuf::from("."),
+            listen: "0.0.0.0:8081".to_owned(),
+            api_host: None,
+        };
+        let addr: SocketAddr = "0.0.0.0:8081".parse().unwrap();
+        let err = cfg
+            .resolve_api_host_checked(addr)
+            .expect_err("wildcard host must be rejected");
+        assert!(err.contains(ENV_API), "error names the env var: {err}");
+        assert!(!err.contains("0.0.0.0/"), "must not advertise wildcard");
+    }
+
+    /// R2-9: the default config (listen `0.0.0.0:8081`, no API host) is
+    /// itself wildcard, so booting it without `FERRO_CARGO_REGISTRY_API`
+    /// must fail rather than advertise `http://0.0.0.0:8081`.
+    #[test]
+    fn default_config_without_api_is_rejected() {
+        let cfg = Config::from_vars(lookup_from(&[]));
+        let addr = cfg.socket_addr().expect("default listen parses");
+        assert!(
+            cfg.resolve_api_host_checked(addr).is_err(),
+            "default wildcard listen must require an explicit API host"
+        );
+    }
+
+    /// R2-9: an ephemeral port 0 is equally unfetchable and is rejected.
+    #[test]
+    fn resolve_api_host_checked_rejects_port_zero() {
+        let cfg = Config {
+            data_dir: PathBuf::from("."),
+            listen: "127.0.0.1:0".to_owned(),
+            api_host: None,
+        };
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        assert!(
+            cfg.resolve_api_host_checked(addr).is_err(),
+            "port 0 must be rejected when no explicit API host is set"
+        );
+    }
+
+    /// R2-9: an explicit `FERRO_CARGO_REGISTRY_API` is always honoured,
+    /// even with a wildcard listen — the operator opted in to that origin.
+    #[test]
+    fn resolve_api_host_checked_honours_explicit_with_wildcard_listen() {
+        let cfg = Config {
+            data_dir: PathBuf::from("."),
+            listen: "0.0.0.0:8081".to_owned(),
+            api_host: Some("https://registry.example".to_owned()),
+        };
+        let addr: SocketAddr = "0.0.0.0:8081".parse().unwrap();
+        assert_eq!(
+            cfg.resolve_api_host_checked(addr).expect("explicit honoured"),
+            "https://registry.example"
+        );
+    }
+
+    /// R2-9: a concrete non-wildcard listen with no explicit API host
+    /// still derives a usable `http://<addr>` origin.
+    #[test]
+    fn resolve_api_host_checked_derives_for_concrete_addr() {
+        let cfg = Config {
+            data_dir: PathBuf::from("."),
+            listen: "127.0.0.1:8081".to_owned(),
+            api_host: None,
+        };
+        let addr: SocketAddr = "127.0.0.1:8081".parse().unwrap();
+        assert_eq!(
+            cfg.resolve_api_host_checked(addr).expect("derived"),
+            "http://127.0.0.1:8081"
+        );
     }
 
     #[test]

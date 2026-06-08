@@ -101,6 +101,15 @@ FERRO_CARGO_REGISTRY_API=http://127.0.0.1:8081 \
 | `FERRO_CARGO_REGISTRY_LISTEN` | `0.0.0.0:8081`    | Listen socket address |
 | `FERRO_CARGO_REGISTRY_API`    | `http://<listen>` | API host advertised in `/config.json` |
 
+`FERRO_CARGO_REGISTRY_API` is **required** whenever the listen host is a
+wildcard (`0.0.0.0` / `::`) or the port is `0`: a derived origin such as
+`http://0.0.0.0:8081` (or a `:0` port) is advertised in `config.json`
+but is not fetchable by a remote cargo client. With a wildcard or
+port-`0` listen and no explicit API host, the binary **refuses to boot**
+and prints a message naming `FERRO_CARGO_REGISTRY_API`. A concrete
+non-wildcard listen (for example `127.0.0.1:8081`) derives a usable
+`http://<addr>` origin automatically.
+
 The binary mounts Kubernetes-style probes alongside the protocol
 routes: `GET /live`, `GET /ready`, and `GET /healthz`
 (`{"status":"ok"}`). Shutdown is graceful on `SIGTERM` / Ctrl-C.
