@@ -432,6 +432,110 @@ mod tests {
     }
 
     #[test]
+    fn add_ca_pem_file_propagates_read_error() {
+        // tls.rs:77 `add_ca_pem_file` → `Ok(Default::default())` would
+        // swallow the missing-file error and return an Ok builder. The
+        // real impl reads the file first and surfaces the I/O failure.
+        let err = TlsConfig::builder()
+            .add_ca_pem_file("/nonexistent/ferro-lumberjack/ca.pem")
+            .err()
+            .expect("missing CA file must error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("/nonexistent/ferro-lumberjack/ca.pem"),
+            "error must name the unreadable path: {msg}",
+        );
+    }
+
+    #[test]
+    fn add_ca_pem_file_reads_real_file() {
+        // Positive side of tls.rs:77: a real PEM file on disk is read and
+        // parsed (the mutant would ignore the contents entirely).
+        let params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = params.self_signed(&key).unwrap();
+        let mut tf = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut tf, cert.pem().as_bytes()).unwrap();
+        let cfg = TlsConfig::builder()
+            .add_ca_pem_file(tf.path())
+            .expect("real PEM file must parse")
+            .build()
+            .expect("build");
+        let _ = cfg.inner();
+    }
+
+    #[test]
+    fn cert_pem_file_propagates_read_error() {
+        // tls.rs:195 `cert_pem_file` → `Ok(Default::default())`.
+        let err = ServerTlsConfig::builder()
+            .cert_pem_file("/nonexistent/ferro-lumberjack/cert.pem")
+            .expect_err("missing cert file must error");
+        assert!(
+            err.to_string().contains("/nonexistent/ferro-lumberjack/cert.pem"),
+            "{err}",
+        );
+    }
+
+    #[test]
+    fn key_pem_file_propagates_read_error() {
+        // tls.rs:218 `key_pem_file` → `Ok(Default::default())`.
+        let err = ServerTlsConfig::builder()
+            .key_pem_file("/nonexistent/ferro-lumberjack/key.pem")
+            .expect_err("missing key file must error");
+        assert!(
+            err.to_string().contains("/nonexistent/ferro-lumberjack/key.pem"),
+            "{err}",
+        );
+    }
+
+    #[test]
+    fn cert_and_key_pem_files_round_trip_from_disk() {
+        // Positive side of tls.rs:195 + 218: reading both cert and key
+        // from real files yields a buildable server config.
+        let params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+        let kp = rcgen::KeyPair::generate().unwrap();
+        let cert = params.self_signed(&kp).unwrap();
+        let mut cert_f = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut cert_f, cert.pem().as_bytes()).unwrap();
+        let mut key_f = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut key_f, kp.serialize_pem().as_bytes()).unwrap();
+
+        let cfg = ServerTlsConfig::builder()
+            .cert_pem_file(cert_f.path())
+            .expect("read cert from disk")
+            .key_pem_file(key_f.path())
+            .expect("read key from disk")
+            .build()
+            .expect("build server config");
+        let _ = cfg.inner();
+    }
+
+    #[test]
+    fn server_tls_builder_debug_renders_fields() {
+        // tls.rs:184 Debug::fmt → `Ok(Default::default())` (empty string).
+        // Assert the real impl renders the struct name and the concrete
+        // cert_chain_len / key_loaded fields, before and after loading.
+        let empty = ServerTlsConfig::builder();
+        let s = format!("{empty:?}");
+        assert!(s.contains("ServerTlsConfigBuilder"), "{s}");
+        assert!(s.contains("cert_chain_len: 0"), "{s}");
+        assert!(s.contains("key_loaded: false"), "{s}");
+
+        let params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+        let kp = rcgen::KeyPair::generate().unwrap();
+        let cert = params.self_signed(&kp).unwrap();
+        let loaded = ServerTlsConfig::builder()
+            .cert_pem_bytes(cert.pem().as_bytes())
+            .unwrap()
+            .key_pem_bytes(kp.serialize_pem().as_bytes())
+            .unwrap();
+        let s2 = format!("{loaded:?}");
+        assert!(s2.contains("cert_chain_len: 1"), "{s2}");
+        assert!(s2.contains("key_loaded: true"), "{s2}");
+        assert!(!s2.is_empty());
+    }
+
+    #[test]
     fn add_self_signed_pem_ok() {
         let params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).expect("params");
         let key = rcgen::KeyPair::generate().expect("keypair");

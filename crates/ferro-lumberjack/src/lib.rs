@@ -55,3 +55,28 @@ pub const PROTOCOL_VERSION: u8 = b'2';
 /// to make zlib-bomb attacks O(memory-bounded) instead of unbounded. Used
 /// by [`FrameDecoder::new`].
 pub const DEFAULT_MAX_FRAME_PAYLOAD: usize = 64 * 1024 * 1024;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_max_frame_payload_is_exactly_64_mib() {
+        // Pins the `64 * 1024 * 1024` arithmetic (lib.rs:57). Both `*`
+        // operators must be multiplication:
+        //   - real:            64 * 1024 * 1024 = 67_108_864
+        //   - `64 + 1024*1024` =  1_048_640 (col-49 `*`→`+` mutant)
+        //   - `64*1024 + 1024` =     66_560 (col-56 `*`→`+` mutant)
+        // The exact-equality assertion below distinguishes all three.
+        assert_eq!(DEFAULT_MAX_FRAME_PAYLOAD, 67_108_864);
+        assert_eq!(DEFAULT_MAX_FRAME_PAYLOAD, 64 * 1024 * 1024);
+        // Sanity: the two `+`-mutant values are NOT equal to the real one.
+        assert_ne!(DEFAULT_MAX_FRAME_PAYLOAD, 64 + 1024 * 1024);
+        assert_ne!(DEFAULT_MAX_FRAME_PAYLOAD, 64 * 1024 + 1024);
+    }
+
+    #[test]
+    fn protocol_version_byte_is_ascii_two() {
+        assert_eq!(PROTOCOL_VERSION, b'2');
+    }
+}

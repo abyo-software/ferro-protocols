@@ -389,6 +389,66 @@ mod tests {
     use crate::frame::{encode_compressed, encode_json_frame, encode_window};
     use tokio::net::TcpStream as ClientTcp;
 
+    /// Build a legacy `D` frame with `pair_count` zero-length KV pairs
+    /// (so it consumes exactly one window slot without a JSON payload).
+    fn legacy_d_frame_empty(seq: u32, pair_count: u32) -> Vec<u8> {
+        let mut f = Vec::new();
+        f.push(b'2');
+        f.push(b'D');
+        f.extend_from_slice(&seq.to_be_bytes());
+        f.extend_from_slice(&pair_count.to_be_bytes());
+        // `pair_count` pairs of (key_len=0, val_len=0).
+        for _ in 0..pair_count {
+            f.extend_from_slice(&0u32.to_be_bytes()); // key_len
+            f.extend_from_slice(&0u32.to_be_bytes()); // val_len
+        }
+        f
+    }
+
+    #[test]
+    fn read_chunk_constant_is_8_kib() {
+        // server.rs:51 `8 * 1024` (`*`→`+` mutant → 8+1024 = 1032).
+        assert_eq!(READ_CHUNK, 8192);
+        assert_eq!(READ_CHUNK, 8 * 1024);
+        assert_ne!(READ_CHUNK, 8 + 1024);
+    }
+
+    #[test]
+    fn consume_slot_decrements_and_guards() {
+        // server.rs:352/355/358. Drives consume_slot directly (it is a
+        // pure const fn over the remaining-count Option).
+        //
+        // No window header yet → must Err (kills body→`Ok(())`).
+        let mut none: Option<u32> = None;
+        assert!(matches!(
+            ServerConnection::consume_slot(&mut none),
+            Err(ProtocolError::Codec(_))
+        ));
+
+        // remaining == 0 → must Err (kills `== 0`→`!= 0`, and body→Ok).
+        let mut zero = Some(0u32);
+        assert!(matches!(
+            ServerConnection::consume_slot(&mut zero),
+            Err(ProtocolError::Codec(_))
+        ));
+        assert_eq!(zero, Some(0), "errored path must not mutate the count");
+
+        // remaining == 2 → Ok and decrements to 1 (kills `-=`→`+=`/`/=`:
+        // `+=` → 3, `/=` → 0). Then 1 → 0, then 0 → Err.
+        let mut two = Some(2u32);
+        assert!(ServerConnection::consume_slot(&mut two).is_ok());
+        assert_eq!(two, Some(1), "`-= 1` must yield 1 (not 3 via += , not 2 via /=)");
+        assert!(ServerConnection::consume_slot(&mut two).is_ok());
+        assert_eq!(two, Some(0));
+        assert!(
+            matches!(
+                ServerConnection::consume_slot(&mut two),
+                Err(ProtocolError::Codec(_))
+            ),
+            "consuming past zero must error",
+        );
+    }
+
     /// Spin up a Listener bound to 127.0.0.1:0 and return its addr +
     /// the listener itself.
     async fn ephemeral_listener() -> (SocketAddr, Listener) {
@@ -567,6 +627,96 @@ mod tests {
         let window = server.await.unwrap().expect("window");
         assert!(window.events.is_empty());
         assert_eq!(window.last_seq, 0);
+    }
+
+    #[tokio::test]
+    async fn window_of_legacy_d_frames_completes() {
+        // server.rs:298 (`window_remaining == Some(0)` after consume_slot
+        // in the Unknown arm). A window declaring 2 frames, satisfied by
+        // two legacy `D` frames, must complete and ACK. With `==`→`!=` the
+        // loop would never recognise completion → the read would hang
+        // waiting for more bytes and then surface UnexpectedEof on close,
+        // never producing the window.
+        let (addr, listener) = ephemeral_listener().await;
+        let server = tokio::spawn(async move {
+            let mut conn = listener.accept().await.unwrap();
+            conn.read_and_ack().await
+        });
+
+        let mut client = ClientTcp::connect(addr).await.unwrap();
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&encode_window(2));
+        wire.extend_from_slice(&legacy_d_frame_empty(1, 0));
+        wire.extend_from_slice(&legacy_d_frame_empty(2, 0));
+        client.write_all(&wire).await.unwrap();
+        client.flush().await.unwrap();
+
+        let mut ack = [0u8; 6];
+        tokio::io::AsyncReadExt::read_exact(&mut client, &mut ack)
+            .await
+            .unwrap();
+        assert_eq!(ack[1], b'A');
+        // No JSON events were recorded but the window completed; last_seq
+        // stays 0 because D frames carry no recorded seq.
+        let window = server.await.unwrap().unwrap().expect("window completes");
+        assert!(window.events.is_empty(), "D frames carry no JSON events");
+    }
+
+    #[tokio::test]
+    async fn mixed_json_and_d_frames_consume_correct_slots() {
+        // Reinforces server.rs:298 + consume_slot: a 3-frame window made
+        // of [JSON, D, JSON] completes exactly when the third frame lands,
+        // proving each D frame consumes precisely one slot.
+        let (addr, listener) = ephemeral_listener().await;
+        let server = tokio::spawn(async move {
+            let mut conn = listener.accept().await.unwrap();
+            conn.read_and_ack().await
+        });
+
+        let mut client = ClientTcp::connect(addr).await.unwrap();
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&encode_window(3));
+        wire.extend_from_slice(&encode_json_frame(1, b"first"));
+        wire.extend_from_slice(&legacy_d_frame_empty(2, 0));
+        wire.extend_from_slice(&encode_json_frame(3, b"third"));
+        client.write_all(&wire).await.unwrap();
+        client.flush().await.unwrap();
+
+        let mut ack = [0u8; 6];
+        tokio::io::AsyncReadExt::read_exact(&mut client, &mut ack)
+            .await
+            .unwrap();
+        assert_eq!(u32::from_be_bytes([ack[2], ack[3], ack[4], ack[5]]), 3);
+        let window = server.await.unwrap().unwrap().expect("window");
+        assert_eq!(window.events.len(), 2, "two JSON events, D slot consumed");
+        assert_eq!(window.events[0].seq, 1);
+        assert_eq!(window.events[1].seq, 3);
+        assert_eq!(window.last_seq, 3);
+    }
+
+    #[tokio::test]
+    async fn d_frame_before_window_is_rejected() {
+        // server.rs:352 consume_slot body → `Ok(())` would silently accept
+        // a D frame with no window header. The real code returns
+        // Codec(UnknownFrameType('D')).
+        let (addr, listener) = ephemeral_listener().await;
+        let server = tokio::spawn(async move {
+            let mut conn = listener.accept().await.unwrap();
+            conn.read_window().await
+        });
+
+        let mut client = ClientTcp::connect(addr).await.unwrap();
+        client
+            .write_all(&legacy_d_frame_empty(1, 0))
+            .await
+            .unwrap();
+        client.flush().await.unwrap();
+
+        let result = server.await.unwrap();
+        assert!(
+            matches!(result, Err(ProtocolError::Codec(_))),
+            "D frame before window must be rejected, got {result:?}",
+        );
     }
 
     #[tokio::test]

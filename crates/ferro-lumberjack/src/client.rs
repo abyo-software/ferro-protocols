@@ -379,6 +379,169 @@ impl Client {
 mod tests {
     use super::*;
 
+    /// Build a `Client` with the given hosts/seq directly, bypassing the
+    /// network. Used by the synchronous arithmetic/host tests.
+    fn offline_client(hosts: Vec<String>, load_balance: bool, seq: u32) -> Client {
+        Client {
+            hosts,
+            load_balance,
+            timeout: DEFAULT_TIMEOUT,
+            compression_level: 0,
+            host_cursor: AtomicUsize::new(0),
+            seq: Sequence::new(seq),
+            connection: None,
+            #[cfg(feature = "tls")]
+            tls: None,
+        }
+    }
+
+    #[test]
+    fn next_seq_reports_advanced_watermark() {
+        // client.rs:191 `next_seq -> 0` / `-> 1`. Start the counter at a
+        // value where advance(1) is neither 0 nor 1, so both constant
+        // mutants are killed.
+        let c = offline_client(vec!["h:1".into()], false, 40);
+        assert_eq!(c.next_seq(), 41, "advance(1) of 40 → 41");
+        // next_seq is pure (does not mutate self.seq); calling twice is
+        // stable.
+        assert_eq!(c.next_seq(), 41);
+
+        // Also exercise a value where the real result differs from the
+        // mutant constant 1 *and* 0 unambiguously.
+        let c2 = offline_client(vec!["h:1".into()], false, u32::MAX);
+        assert_eq!(c2.next_seq(), 0, "advance(1) of u32::MAX wraps to 0");
+        let c3 = offline_client(vec!["h:1".into()], false, 999);
+        assert_eq!(c3.next_seq(), 1000);
+    }
+
+    #[test]
+    fn host_count_reflects_configured_hosts() {
+        // client.rs:197 `host_count -> 0` / `-> 1`.
+        let c0 = offline_client(vec![], false, 0);
+        assert_eq!(c0.host_count(), 0);
+        let c1 = offline_client(vec!["a:1".into()], false, 0);
+        assert_eq!(c1.host_count(), 1);
+        let c3 = offline_client(vec!["a:1".into(), "b:2".into(), "c:3".into()], false, 0);
+        assert_eq!(c3.host_count(), 3, "kills both `-> 0` and `-> 1` mutants");
+    }
+
+    #[test]
+    fn pick_host_load_balanced_round_robins_with_modulo() {
+        // client.rs:344 `% hosts.len()` (load-balanced arm). With 3 hosts
+        // the cursor 0,1,2,3,4 must map to a,b,c,a,b — proving modulo, not
+        // `/` (which would give 0,0,0,1,1 → a,a,a,b,b) and not `+` (which
+        // would index out of bounds / wrong host).
+        let c = offline_client(
+            vec!["a:1".into(), "b:2".into(), "c:3".into()],
+            true,
+            0,
+        );
+        let picks: Vec<&str> = (0..6).map(|_| c.pick_host()).collect();
+        assert_eq!(picks, ["a:1", "b:2", "c:3", "a:1", "b:2", "c:3"]);
+    }
+
+    #[test]
+    fn pick_host_sticky_uses_modulo_of_cursor() {
+        // client.rs:348 `% hosts.len()` (sticky arm). The sticky arm
+        // does NOT advance the cursor; it maps the current cursor through
+        // modulo. Pre-load the cursor to 4 with 3 hosts → 4 % 3 = 1 → "b".
+        // `/`-mutant: 4 / 3 = 1 (same here) — so also test cursor=7 where
+        // 7 % 3 = 1 ("b") but 7 / 3 = 2 ("c"), distinguishing `%` from `/`.
+        let c = offline_client(
+            vec!["a:1".into(), "b:2".into(), "c:3".into()],
+            false,
+            0,
+        );
+        c.host_cursor.store(7, Ordering::Relaxed);
+        assert_eq!(c.pick_host(), "b:2", "7 % 3 = 1 → b (kills `/` → would pick c)");
+        // Sticky: repeated calls return the same host (cursor unchanged).
+        assert_eq!(c.pick_host(), "b:2");
+        c.host_cursor.store(4, Ordering::Relaxed);
+        assert_eq!(c.pick_host(), "b:2", "4 % 3 = 1 → b");
+        c.host_cursor.store(5, Ordering::Relaxed);
+        assert_eq!(c.pick_host(), "c:3", "5 % 3 = 2 → c");
+    }
+
+    #[test]
+    fn build_window_payload_compresses_only_when_shrinking() {
+        // client.rs:331 `compression_level > 0` and 333 `compressed.len()
+        // < inner.len()`.
+        //
+        // Highly compressible large batch with compression enabled → the
+        // payload must be SHORTER than the uncompressed-inner form, i.e.
+        // the compressed branch was taken.
+        let mut c = offline_client(vec!["h:1".into()], false, 0);
+        c.compression_level = 9;
+        let events: Vec<Vec<u8>> = (0..32).map(|_| vec![b'a'; 256]).collect();
+        let inner_len: usize = events
+            .iter()
+            .map(|e| 10 + e.len()) // encode_json_frame overhead
+            .sum();
+        let payload = c.build_window_payload(&events, Sequence::new(0));
+        // payload = 6-byte window header + body. Body should be the
+        // compressed form (much smaller than inner_len).
+        assert!(
+            payload.len() < 6 + inner_len,
+            "compressible batch must shrink: {} !< {}",
+            payload.len(),
+            6 + inner_len,
+        );
+        // First 6 bytes are the window header for count=32.
+        assert_eq!(&payload[..2], b"2W");
+        assert_eq!(
+            u32::from_be_bytes([payload[2], payload[3], payload[4], payload[5]]),
+            32,
+        );
+    }
+
+    #[test]
+    fn build_window_payload_skips_compression_when_disabled() {
+        // client.rs:331 `compression_level > 0` (== mutant). With level 0
+        // the body must be the raw uncompressed inner frames — so a JSON
+        // frame header ('2','J') appears right after the 6-byte window
+        // header. A `>`→`==` mutant on level 0 would also skip, but a
+        // `>`→`<`/`>=` mutant misbehaves; assert the concrete layout.
+        let mut c = offline_client(vec!["h:1".into()], false, 0);
+        c.compression_level = 0;
+        let events = vec![br#"{"x":1}"#.to_vec()];
+        let payload = c.build_window_payload(&events, Sequence::new(0));
+        assert_eq!(&payload[..2], b"2W", "window header");
+        // Byte 6/7 begin the inner JSON frame (uncompressed).
+        assert_eq!(&payload[6..8], b"2J", "uncompressed inner JSON frame");
+    }
+
+    #[test]
+    fn build_window_payload_does_not_compress_incompressible_small_batch() {
+        // client.rs:333 `compressed.len() < inner.len()`. A single tiny
+        // event does not shrink under zlib (header overhead dominates), so
+        // even with compression enabled the uncompressed branch is taken
+        // and the inner JSON frame appears verbatim after the window
+        // header. Kills `<`→`>`/`<=`/`==` (which would emit the larger
+        // compressed form or mis-branch).
+        let mut c = offline_client(vec!["h:1".into()], false, 0);
+        c.compression_level = 9;
+        let events = vec![b"q".to_vec()];
+        let payload = c.build_window_payload(&events, Sequence::new(0));
+        assert_eq!(&payload[..2], b"2W");
+        assert_eq!(&payload[6..8], b"2J", "tiny batch stays uncompressed");
+    }
+
+    #[test]
+    fn client_debug_includes_field_values() {
+        // client.rs:140 Debug::fmt → `Ok(Default::default())`. The mutant
+        // would produce an EMPTY string; assert the real impl renders the
+        // struct name and concrete field values.
+        let mut c = offline_client(vec!["host-x:9999".into()], true, 0);
+        c.compression_level = 7;
+        let s = format!("{c:?}");
+        assert!(s.contains("Client"), "{s}");
+        assert!(s.contains("host-x:9999"), "hosts field rendered: {s}");
+        assert!(s.contains("load_balance: true"), "{s}");
+        assert!(s.contains("compression_level: 7"), "{s}");
+        assert!(s.contains("connected: false"), "{s}");
+        assert!(!s.is_empty());
+    }
+
     #[test]
     fn builder_requires_hosts() {
         let res = tokio_test::block_on(ClientBuilder::new().connect());
@@ -472,6 +635,111 @@ mod tests {
             .expect_err("must time out");
         assert!(matches!(err, ProtocolError::AllHostsFailed(_)));
         server.abort();
+    }
+
+    /// Spawn a fake Logstash that reads the request then replies with a
+    /// single ACK frame carrying `ack_seq`. Returns the bound addr.
+    async fn ack_server(ack_seq: u32) -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 8192];
+            let _ = sock.read(&mut buf).await.unwrap();
+            let mut ack = [b'2', b'A', 0, 0, 0, 0];
+            ack[2..6].copy_from_slice(&ack_seq.to_be_bytes());
+            sock.write_all(&ack).await.unwrap();
+            sock.flush().await.unwrap();
+        });
+        addr
+    }
+
+    async fn connect_to(addr: std::net::SocketAddr) -> Client {
+        ClientBuilder::new()
+            .add_host(addr.to_string())
+            .compression_level(0)
+            .timeout(Duration::from_secs(5))
+            .connect()
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn full_ack_returns_count() {
+        // base_seq starts at 0, send 3 events → expected last seq = 3.
+        let addr = ack_server(3).await;
+        let mut client = connect_to(addr).await;
+        let acked = client
+            .send_json(vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()])
+            .await
+            .unwrap();
+        assert_eq!(acked, 3, "full ack must return the full count");
+    }
+
+    #[tokio::test]
+    async fn partial_ack_surfaces_partial_error() {
+        // client.rs:303. Send 3 events (base=0, count=3). Receiver acks
+        // seq=2 → acked_count = 2, in 1..count → PartialAck{acked:2}.
+        // Kills `==`→`!=` (would mark valid partial as UnexpectedAck) and
+        // `>`→`<` (2 < 3 would mark partial as UnexpectedAck).
+        let addr = ack_server(2).await;
+        let mut client = connect_to(addr).await;
+        let err = client
+            .send_json(vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()])
+            .await
+            .expect_err("must be partial");
+        match err {
+            ProtocolError::AllHostsFailed(inner) => match *inner {
+                ProtocolError::PartialAck { acked, sent } => {
+                    assert_eq!(acked, 2);
+                    assert_eq!(sent, 3);
+                }
+                other => panic!("expected PartialAck, got {other:?}"),
+            },
+            other => panic!("expected AllHostsFailed(PartialAck), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn zero_acked_count_is_unexpected_ack() {
+        // client.rs:303 `acked_count == 0` arm. Receiver acks seq=0 which
+        // equals base_seq → acked_count = 0 → UnexpectedAck (NOT
+        // PartialAck). Kills `||`→`&&` (0 alone would slip to PartialAck)
+        // and `==`→`!=`.
+        let addr = ack_server(0).await;
+        let mut client = connect_to(addr).await;
+        let err = client
+            .send_json(vec![b"a".to_vec(), b"b".to_vec()])
+            .await
+            .expect_err("must reject zero-acked");
+        match err {
+            ProtocolError::AllHostsFailed(inner) => assert!(
+                matches!(*inner, ProtocolError::UnexpectedAck { .. }),
+                "expected UnexpectedAck, got {inner:?}",
+            ),
+            other => panic!("expected AllHostsFailed(UnexpectedAck), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn over_count_ack_is_unexpected_ack() {
+        // client.rs:303 `acked_count > count` arm. Send 2 events (base=0,
+        // count=2). Receiver acks seq=5 → acked_count = 5 > 2 →
+        // UnexpectedAck (NOT PartialAck). Kills `>`→`==` (5 != 2 so it
+        // would slip to PartialAck) and `||`→`&&`.
+        let addr = ack_server(5).await;
+        let mut client = connect_to(addr).await;
+        let err = client
+            .send_json(vec![b"a".to_vec(), b"b".to_vec()])
+            .await
+            .expect_err("must reject over-count ack");
+        match err {
+            ProtocolError::AllHostsFailed(inner) => assert!(
+                matches!(*inner, ProtocolError::UnexpectedAck { .. }),
+                "expected UnexpectedAck, got {inner:?}",
+            ),
+            other => panic!("expected AllHostsFailed(UnexpectedAck), got {other:?}"),
+        }
     }
 
     #[tokio::test]
