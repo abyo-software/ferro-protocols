@@ -29,3 +29,5 @@ dist/
 # Keep them locally, but don't ship them with the public repo.
 PHASE_*_REPORT.md
 HARDENING_REPORT.md
+dd-pack/mutation/
+.mutants-tmp/
