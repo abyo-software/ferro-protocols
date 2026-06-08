@@ -1,0 +1,40 @@
+ferro-oci-server {{ .Chart.AppVersion }} has been installed.
+
+Workload: {{ .Values.kind }} {{ include "ferro-oci-server.fullname" . }}
+Namespace: {{ .Release.Namespace }}
+
+{{- if .Values.persistence.enabled }}
+Persistence: PVC {{ include "ferro-oci-server.pvcName" . }} ({{ .Values.persistence.size }}) mounted at {{ .Values.persistence.mountPath }}
+{{- else }}
+Persistence: DISABLED — using an emptyDir. Blobs are LOST on pod restart.
+{{- end }}
+
+Watch the rollout:
+
+  kubectl --namespace {{ .Release.Namespace }} rollout status {{ .Values.kind | lower }}/{{ include "ferro-oci-server.fullname" . }}
+
+Tail the logs:
+
+  kubectl --namespace {{ .Release.Namespace }} logs -l \
+      app.kubernetes.io/instance={{ .Release.Name }} -f --tail=50
+
+Hit the registry (port-forward from your shell):
+
+  kubectl --namespace {{ .Release.Namespace }} port-forward svc/{{ include "ferro-oci-server.fullname" . }} 8080:{{ .Values.service.port }}
+
+  curl -s http://localhost:8080/live      # liveness (200 OK)
+  curl -s http://localhost:8080/ready     # readiness (200 OK)
+  curl -s http://localhost:8080/healthz   # {"status":"ok"}
+  curl -s http://localhost:8080/v2/       # OCI Distribution API root
+
+Push an image (example):
+
+  docker tag alpine:latest localhost:8080/alpine:latest
+  docker push localhost:8080/alpine:latest
+{{- if .Values.serviceMonitor.enabled }}
+
+ServiceMonitor is ENABLED. NOTE: ferro-oci-server does not yet expose a
+Prometheus /metrics endpoint (roadmap) — until it does, this will produce
+scrape errors. Disable it (`serviceMonitor.enabled=false`) if the server
+build you deployed has no /metrics.
+{{- end }}

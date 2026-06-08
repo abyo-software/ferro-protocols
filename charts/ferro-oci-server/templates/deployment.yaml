@@ -1,0 +1,104 @@
+{{/* SPDX-License-Identifier: Apache-2.0 */}}
+apiVersion: apps/v1
+kind: {{ .Values.kind }}
+metadata:
+  name: {{ include "ferro-oci-server.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "ferro-oci-server.labels" . | nindent 4 }}
+spec:
+  {{- if eq .Values.kind "Deployment" }}
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    # The default PVC is ReadWriteOnce; Recreate avoids two pods racing for
+    # the same volume during a rollout. Switch to RollingUpdate only with a
+    # ReadWriteMany storage class.
+    type: Recreate
+  {{- end }}
+  selector:
+    matchLabels: {{- include "ferro-oci-server.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "ferro-oci-server.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        # Roll the pod when the rendered config changes.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "ferro-oci-server.serviceAccountName" . }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext: {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- if .Values.hostNetwork }}
+      hostNetwork: true
+      dnsPolicy: {{ default "ClusterFirstWithHostNet" .Values.dnsPolicy }}
+      {{- else if .Values.dnsPolicy }}
+      dnsPolicy: {{ .Values.dnsPolicy }}
+      {{- end }}
+      {{- if .Values.hostPID }}
+      hostPID: true
+      {{- end }}
+      {{- if .Values.hostIPC }}
+      hostIPC: true
+      {{- end }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: ferro-oci-server
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext: {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "ferro-oci-server.fullname" . }}
+          {{- with .Values.extraEnv }}
+          env: {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if .Values.probes.liveness.enabled }}
+          livenessProbe: {{- omit .Values.probes.liveness "enabled" | toYaml | nindent 12 }}
+          {{- end }}
+          {{- if .Values.probes.readiness.enabled }}
+          readinessProbe: {{- omit .Values.probes.readiness "enabled" | toYaml | nindent 12 }}
+          {{- end }}
+          {{- if .Values.probes.startup.enabled }}
+          startupProbe: {{- omit .Values.probes.startup "enabled" | toYaml | nindent 12 }}
+          {{- end }}
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: {{ .Values.persistence.mountPath }}
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "ferro-oci-server.pvcName" . }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 32Mi
