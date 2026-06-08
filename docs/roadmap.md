@@ -7,17 +7,21 @@ in the parent project; this is the public-facing summary.
 
 ## Tier 1 — first wave
 
-These five crates are the foundation. Each is extracted from a Ferro
-ecosystem product where it has working test coverage today.
+These six crates are the foundation. Each is extracted from a Ferro
+ecosystem product where it has working test coverage today. All six
+reached their first semver-stable release (`v1.0.0`) on 2026-06-08 —
+clippy pedantic + nursery clean under `-D warnings`, `unsafe_code =
+forbid`, `cargo audit` / `cargo deny` clean, ≥95% mutation kill rate,
+≥85% line coverage, and a 6-round adversarial design-review pass.
 
 | Crate | Source product | Current version | Stability |
 |---|---|---|---|
-| [`ferro-blob-store`](../crates/ferro-blob-store/) | FerroRepo storage | `v0.0.3` | alpha — published 2026-04-26, foundation crate |
-| [`ferro-lumberjack`](../crates/ferro-lumberjack/) | FerroBeat / FerroHeartbeat | `v0.1.0` | beta — published 2026-04-26, client + server, TLS both directions |
-| [`ferro-airflow-dag-parser`](../crates/ferro-airflow-dag-parser/) | `ferro-air` | `v0.0.1` | alpha — published 2026-04-26, ruff backend, 75 tests |
-| [`ferro-maven-layout`](../crates/ferro-maven-layout/) | FerroRepo Maven | `v0.0.1` | alpha — published 2026-04-26, 49 tests |
-| [`ferro-cargo-registry-server`](../crates/ferro-cargo-registry-server/) | FerroRepo Cargo | `v0.0.1` | alpha — published 2026-04-26, sparse index, 38 tests |
-| [`ferro-oci-server`](../crates/ferro-oci-server/) | FerroRepo OCI | `v0.0.1` | alpha — published 2026-04-26, 67 tests; conformance harness pending for `v0.1.0` |
+| [`ferro-blob-store`](../crates/ferro-blob-store/) | FerroRepo storage | `v1.0.0` | stable — foundation content-addressed blob store (in-memory + filesystem) |
+| [`ferro-lumberjack`](../crates/ferro-lumberjack/) | FerroBeat / FerroHeartbeat | `v1.0.0` | stable — Lumberjack/Beats v2 codec + client + server, TLS both directions; per-window memory cap |
+| [`ferro-airflow-dag-parser`](../crates/ferro-airflow-dag-parser/) | `ferro-air` | `v1.0.0` | stable — static AST DAG extraction (ruff backend), panic-shielded |
+| [`ferro-maven-layout`](../crates/ferro-maven-layout/) | FerroRepo Maven | `v1.0.0` | stable — Maven layout 2.0 + POM/metadata parsing (panic-shielded); PUT body limit + TOCTOU fix |
+| [`ferro-cargo-registry-server`](../crates/ferro-cargo-registry-server/) | FerroRepo Cargo | `v1.0.0` | stable — Cargo Alternative Registry (RFC 2789) server + binary + `/metrics` + K8s probes + durable index; real-`cargo` verified |
+| [`ferro-oci-server`](../crates/ferro-oci-server/) | FerroRepo OCI | `v1.0.0` | stable — OCI Distribution v1.1 server + binary + `/metrics` + K8s probes + durable metadata. **Official conformance suite: 75/75 specs pass** (harness in `crates/ferro-oci-server/tests/conformance/`) |
 
 ## Tier 2 — secondary wave
 
@@ -60,9 +64,11 @@ rather than fork.
 | Beta | `v0.1.x`–`v0.x.x` | Allowed at minor bumps; deprecation cycle starts | 6-12 months |
 | Stable | `v1.x.x` | Strict semver | indefinite |
 
-`ferro-lumberjack` enters at `v0.0.1` despite having working code in
-the Ferro ecosystem because the public API surface (server-side, fluent
-client builder) is still being shaped.
+All six Tier 1 crates reached **Stable (`v1.x`)** on 2026-06-08. From
+`v1.0.0` onward each crate's public API is a strict semver contract:
+breaking changes (renames, removals, or signature changes that aren't
+strict additions) require a major bump; minor releases may add items and
+`#[deprecate]` existing ones, but will not remove them.
 
 ## What "ready to publish" means here
 

@@ -22,8 +22,8 @@ running the source.
 > leaves hanging: *what if the structural read didn't need
 > CPython at all?*
 
-> 🟢 **Beta (`v0.1.0`).** Public API is stable for the `v0.1.x`
-> series; additive changes only between minors. The implementation
+> 🟢 **Stable (`v1.0.0`).** The public API is committed under strict
+> semver: breaking changes require a major bump. The implementation
 > is pulled from production use in the Ferro ecosystem; it is the
 > static fast-path that orchestrators use to skip `CPython`
 > evaluation when a DAG file's structure can be determined by
@@ -177,7 +177,7 @@ workspace's Apache-2.0-clean license profile.
 
 | Aspect | Status |
 |---|---|
-| API stability | **beta** (`v0.1.x`) — additive-only between minors |
+| API stability | **stable** (`v1.x`) — strict semver from `1.0.0` |
 | Use in production | Yes, in [FerroAir](https://github.com/abyo-software/ferro-air) |
 | MSRV | rustc **1.88** |
 | Coverage target | 80%+ line; current measured in CI |

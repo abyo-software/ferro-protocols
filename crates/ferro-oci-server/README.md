@@ -33,10 +33,10 @@ ready-to-run `ferro-oci-server` binary with Kubernetes health probes.
 > answer for the OCI Distribution Spec server side. This crate is
 > a starting point for one.
 
-> 🟢 **Beta (`v0.1.0`).** Public API is stable for the `v0.1.x`
-> series; additive changes only between minors. Conformance-suite
-> green-bar is tracked as a separate `v0.1.x` milestone (not the
-> version-bump gate).
+> 🟢 **Stable (`v1.0.0`).** The public API is committed under strict
+> semver: breaking changes require a major bump. The server passes the
+> official OCI Distribution Spec v1.1 conformance suite: **75/75 specs,
+> 0 failures** (harness in `tests/conformance/`).
 
 Part of the **Ferro ecosystem**. Extracted from FerroRepo, a private
 Rust artifact repository.
@@ -170,7 +170,8 @@ already persists metadata durably via a `metadata.json` snapshot (see
 
 | Aspect | Status |
 |---|---|
-| API stability | **beta** (`v0.1.x`) — additive-only between minors |
+| API stability | **stable** (`v1.x`) — strict semver from `1.0.0` |
+| Conformance | official OCI Distribution v1.1 suite: 75/75 specs, 0 failures |
 | Manifest / blob / tag / catalog / referrers handlers | working |
 | Chunked uploads | working |
 | Runnable server binary + K8s probes (`/live`, `/healthz`, `/ready`) | working |
