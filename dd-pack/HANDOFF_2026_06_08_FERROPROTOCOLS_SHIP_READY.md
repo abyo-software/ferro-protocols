@@ -14,7 +14,7 @@ Ship-ready bar is applied per character (library vs server) per the campaign bri
 |---|-----------|--------|----------|
 | 1 | All 6 crates v1.0.0 GA + CHANGELOG + cargo-semver-checks | ✅ | atomic bump `a4f494f`; CHANGELOG `## [1.0.0]` ×6; semver-checks `v0.0.x → v1.0.0 major` validated |
 | 2 | Codex DD R-series + critic, 0 actionable Critical/High | ✅ | **6 rounds (R1–R6), GA GATE: PASS (0 P0, 0 P1)**; 29 findings all closed w/ regression tests; `08-dd-rounds-history.md` |
-| 3 | Long fuzz campaign (1h × N harness, 0 crashes) | ⏳ running | 8 targets × 1h, local x86-64 libFuzzer; result appended below |
+| 3 | Long fuzz campaign (1h × N harness) | ✅/🟡 | 8 targets × 1h. **6 clean**; 1 real maven path-traversal bug **found + FIXED**; 1 airflow `dynamic_markers` stack-overflow **found + triaged + deferred** to ferro-air (shared crate). Honest detail `fuzz-campaign-2026-06-08.md` |
 | 4 | Mutation ≥95% + line coverage ≥85% per crate | ✅ | all 6 ≥95% mutation (table §3); all 6 ≥85% line (§4) |
 | 5 | clippy pedantic 0 / unsafe forbid / audit 0 / deny clean / SPDX / MSRV | ✅ | workspace `clippy --all-targets --all-features -D warnings` = 0; `unsafe_code = "forbid"`; `cargo audit` 0; `cargo deny` ok; SPDX 84/84 .rs; MSRV 1.88 pinned |
 | 6 | docs.rs landing (crate `//!` + README badges + examples) | ✅ | all 6: crate docs, crates.io/docs.rs/CI badges, runnable `examples/`, `[package.metadata.docs.rs]`; `cargo doc -D warnings` clean |
@@ -114,6 +114,8 @@ p99-steady.
 | FP5 | Server byte-throughput Grafana panels | Minor | 🟡 by-design — request/latency/error/storage panels live on real /metrics; byte-throughput counters annotated as roadmap (not faked) |
 | FP6 | External adoption (downloads / reverse-deps) | Minor | 🟡 by-design — new crates (pre-1.0 published), 0 external reverse-deps; time-series baseline in adoption-snapshot.md; 1.0.0 not yet published |
 | FP7 | cargo owners e2e via real cargo | Minor | 🟡 by-design — cargo has no headless owners subcommand; owners covered at HTTP level, publish/fetch/yank via real cargo |
+| FP8 | airflow `dynamic_markers` stack-overflow on deep mixed-prefix input | Major | ⚪ open — fuzz-found recursion DoS; pre-screen `MAX_UNARY_OP_RUN` caps consecutive runs only, mixed `-`/`not`/`[` chains bypass it → SIGSEGV (catch_unwind can't recover). Triaged + known-crash seeded; **source fix (panic_safe total-prefix-depth cap) deferred to the concurrent ferro-air session** per the shared-crate scope rule. `fuzz-campaign-2026-06-08.md` |
+| FP9 | maven coordinate path-traversal | (was Major) | ✅ closed — fuzz-found, `coordinate.rs` now rejects `.`/`..`/control-char components (`c1acce2`), 7 regression tests + known-crash seed |
 
 Knock-down: original "Early-stage" drivers (no soak / no long fuzz / library-only servers /
 in-memory metadata) all closed (FP1/FP2/FP4 + runnable binaries). FP3 carried as strategic
@@ -133,8 +135,11 @@ local-only (push + crates.io 1.0.0 publish pending orchestrator)."
 
 1. **Pull + terminate the 24h soak** (`i-0d5e60937b218c7f7`) on completion — record
    `soak_latency.csv`/`soak_rss.csv` to `dd-pack/evidence/`, confirm plateau, terminate.
-2. **Append fuzz campaign result** (8 targets × 1h) to this HANDOFF + §1 row 3 once done.
-3. **Push** the 72 local commits + **publish 1.0.0** to crates.io (orchestrator/user decision;
+2. **Fuzz done** — 6/8 clean, maven path-traversal fixed; **FP8 airflow `dynamic_markers`
+   stack-overflow** needs a `panic_safe.rs` total-prefix-depth cap — coordinate with the
+   ferro-air session (it owns airflow source this session). Known-crash seed + triage +
+   recommended fix in `fuzz-campaign-2026-06-08.md`. This is the one open engineering item.
+3. **Push** the local commits + **publish 1.0.0** to crates.io (orchestrator/user decision;
    the published versions are still 0.0.x — GA is local).
 4. **FP3** (external security audit) — buyer-DD scope, carried.
 5. Apply §7 proposals to `career/HONEST_LIMITATIONS_INDEX.md`, `DD_REPORT_2026_04_29.md`,
