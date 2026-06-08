@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use axum::body::{Body, to_bytes};
-use axum::http::{Method, Request, StatusCode};
+use axum::http::{Method, Request, StatusCode, header};
 use ferro_blob_store::FsBlobStore;
 use ferro_maven_layout::{MavenState, router};
 use tempfile::TempDir;
@@ -56,6 +56,41 @@ async fn get(app: &axum::Router, path: &str) -> axum::http::Response<Body> {
         )
         .await
         .expect("response")
+}
+
+async fn head(app: &axum::Router, path: &str) -> axum::http::Response<Body> {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::HEAD)
+                .uri(path)
+                .body(Body::empty())
+                .expect("build"),
+        )
+        .await
+        .expect("response")
+}
+
+async fn del(app: &axum::Router, path: &str) -> axum::http::Response<Body> {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri(path)
+                .body(Body::empty())
+                .expect("build"),
+        )
+        .await
+        .expect("response")
+}
+
+/// Read the `Content-Type` header of a response as a `&str`.
+fn content_type(resp: &axum::http::Response<Body>) -> &str {
+    resp.headers()
+        .get(header::CONTENT_TYPE)
+        .expect("content-type present")
+        .to_str()
+        .expect("content-type is ascii")
 }
 
 #[tokio::test]
@@ -290,4 +325,153 @@ async fn head_returns_no_body() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = to_bytes(resp.into_body(), 1024).await.expect("body");
     assert!(body.is_empty());
+}
+
+/// Each artifact extension maps to a distinct `Content-Type`. This pins
+/// every match arm in `build_artifact_response` so deleting any of them
+/// is caught by mutation testing.
+#[tokio::test]
+async fn artifact_content_types_per_extension() {
+    let (app, _tmp) = setup();
+    let payload: &'static [u8] = b"payload";
+
+    // (path, expected content-type) for one representative of each arm.
+    let cases: &[(&str, &str)] = &[
+        (
+            "/repository/r/com/example/a/1.0/a-1.0.pom",
+            "application/xml",
+        ),
+        (
+            "/repository/r/com/example/a/1.0/a-1.0-site.xml",
+            "application/xml",
+        ),
+        (
+            "/repository/r/com/example/a/1.0/a-1.0.jar",
+            "application/java-archive",
+        ),
+        (
+            "/repository/r/com/example/a/1.0/a-1.0.war",
+            "application/java-archive",
+        ),
+        (
+            "/repository/r/com/example/a/1.0/a-1.0.ear",
+            "application/java-archive",
+        ),
+        (
+            "/repository/r/com/example/a/1.0/a-1.0-dist.tar.gz",
+            "application/gzip",
+        ),
+        (
+            "/repository/r/com/example/a/1.0/a-1.0.tgz",
+            "application/gzip",
+        ),
+        (
+            "/repository/r/com/example/a/1.0/a-1.0.zip",
+            "application/zip",
+        ),
+        // Anything else falls through to the catch-all arm.
+        (
+            "/repository/r/com/example/a/1.0/a-1.0.bin",
+            "application/octet-stream",
+        ),
+    ];
+
+    for (path, expected_ct) in cases {
+        // `.pom` and `.xml` go through the POM-validation path only when
+        // the extension is literally `pom`; the `.pom` case here uses a
+        // matching coordinate-free filename, so store raw bytes for all
+        // by putting a non-pom body — except the pom must be valid XML
+        // matching the URL coordinate.
+        let is_pom = std::path::Path::new(path)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("pom"));
+        let body: &'static [u8] = if is_pom {
+            br#"<?xml version="1.0"?><project><modelVersion>4.0.0</modelVersion><groupId>com.example</groupId><artifactId>a</artifactId><version>1.0</version></project>"#
+        } else {
+            payload
+        };
+        let put_resp = put(&app, path, body).await;
+        assert_eq!(
+            put_resp.status(),
+            StatusCode::CREATED,
+            "PUT failed for {path}"
+        );
+
+        let get_resp = get(&app, path).await;
+        assert_eq!(get_resp.status(), StatusCode::OK, "GET failed for {path}");
+        assert_eq!(
+            content_type(&get_resp),
+            *expected_ct,
+            "content-type mismatch for {path}"
+        );
+    }
+}
+
+/// HEAD of an existing artifact must carry the same headers a GET would
+/// (notably `Content-Type` and `Content-Length`) while omitting the
+/// body. A `Default::default()` response would have neither header and a
+/// 200 status, so asserting the headers catches the `handle_head`
+/// replacement mutant.
+#[tokio::test]
+async fn head_returns_get_headers_without_body() {
+    let (app, _tmp) = setup();
+    let jar: &'static [u8] = b"probe-bytes";
+    put(
+        &app,
+        "/repository/r/com/example/foo/1.0/foo-1.0.jar",
+        jar,
+    )
+    .await;
+
+    let resp = head(&app, "/repository/r/com/example/foo/1.0/foo-1.0.jar").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(content_type(&resp), "application/java-archive");
+    let len = resp
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .expect("content-length present")
+        .to_str()
+        .expect("ascii");
+    assert_eq!(len, jar.len().to_string());
+    let body = to_bytes(resp.into_body(), 1024).await.expect("body");
+    assert!(body.is_empty());
+}
+
+/// HEAD of a missing resource must propagate the 404, not a blanket 200.
+/// `Default::default()` for the handler would yield a 200, so this kills
+/// the `handle_head` replacement mutant from the other direction.
+#[tokio::test]
+async fn head_missing_is_404() {
+    let (app, _tmp) = setup();
+    let resp = head(&app, "/repository/r/com/example/gone/1.0/gone-1.0.jar").await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+/// Deleting one of two paths that share the same blob must NOT delete the
+/// underlying blob: the surviving path must still GET its content. This
+/// exercises the `still_referenced` reference-count guard in
+/// `handle_delete`, killing both the `== → !=` and the deleted-`!`
+/// mutants (either would wrongly delete the shared blob).
+#[tokio::test]
+async fn delete_keeps_blob_shared_by_another_path() {
+    let (app, _tmp) = setup();
+    let shared: &'static [u8] = b"shared-blob-contents";
+
+    let path_a = "/repository/r/com/example/foo/1.0/foo-1.0.jar";
+    let path_b = "/repository/r/com/example/bar/1.0/bar-1.0.jar";
+    put(&app, path_a, shared).await;
+    put(&app, path_b, shared).await;
+
+    // Delete A.
+    let del_resp = del(&app, path_a).await;
+    assert_eq!(del_resp.status(), StatusCode::NO_CONTENT);
+
+    // A is gone from the layout index.
+    assert_eq!(get(&app, path_a).await.status(), StatusCode::NOT_FOUND);
+
+    // B must still resolve to the (still-present) shared blob.
+    let get_b = get(&app, path_b).await;
+    assert_eq!(get_b.status(), StatusCode::OK, "shared blob was wrongly deleted");
+    let got = to_bytes(get_b.into_body(), 1024).await.expect("body");
+    assert_eq!(got.as_ref(), shared);
 }

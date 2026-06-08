@@ -91,6 +91,7 @@ impl IntoResponse for MavenError {
 mod tests {
     use super::MavenError;
     use axum::http::StatusCode;
+    use ferro_blob_store::{BlobStoreError, Digest};
 
     #[test]
     fn invalid_path_maps_to_400() {
@@ -102,5 +103,56 @@ mod tests {
     fn not_found_maps_to_404() {
         let err = MavenError::NotFound("foo.jar".into());
         assert_eq!(err.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn coordinate_and_pom_and_metadata_and_checksum_map_to_400() {
+        // Cover the remaining `BAD_REQUEST` arms of `MavenError::status`.
+        for err in [
+            MavenError::CoordinateMismatch("gav".into()),
+            MavenError::InvalidPom("bad pom".into()),
+            MavenError::InvalidMetadata("bad metadata".into()),
+            MavenError::ChecksumMismatch("nope".into()),
+        ] {
+            assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[test]
+    fn storage_not_found_maps_to_404() {
+        // Exercises the `BlobStoreError::NotFound` arm of `storage_status`.
+        let err = MavenError::Storage(BlobStoreError::NotFound("sha256:deadbeef".into()));
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn storage_digest_mismatch_maps_to_400() {
+        // Exercises the `DigestMismatch` arm of `storage_status`.
+        let err = MavenError::Storage(BlobStoreError::DigestMismatch {
+            expected: "sha256:00".into(),
+            computed: "sha256:11".into(),
+        });
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn storage_invalid_digest_maps_to_400() {
+        // Exercises the `InvalidDigest` arm of `storage_status`. A wire
+        // string without an `<algo>:<hex>` separator fails to parse.
+        let parse_err = "not-a-digest"
+            .parse::<Digest>()
+            .expect_err("must reject malformed digest");
+        let err = MavenError::Storage(BlobStoreError::InvalidDigest(parse_err));
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn storage_io_maps_to_500() {
+        // The catch-all `_` arm of `storage_status` (e.g. an I/O error)
+        // must surface as `INTERNAL_SERVER_ERROR`, distinguishing it from
+        // the explicit 404 / 400 arms.
+        let io = std::io::Error::other("disk gone");
+        let err = MavenError::Storage(BlobStoreError::Io(io));
+        assert_eq!(err.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 }

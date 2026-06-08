@@ -245,8 +245,100 @@ pub fn layout_is_snapshot(path: &LayoutPath) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{PathClass, parse_layout_path};
+    use super::{PathClass, layout_is_snapshot, parse_layout_path};
     use crate::checksum::ChecksumAlgo;
+
+    #[test]
+    fn three_segment_metadata_path_is_accepted() {
+        // Exactly three segments: `{group}/{artifactId}/maven-metadata.xml`.
+        // Distinguishes `segments.len() < 3` from `<= 3` at the top-level
+        // guard (line 65) and inside `classify_metadata` (line 120):
+        // `< 3` admits this path, `<= 3` / `== 3` would reject it.
+        let p = parse_layout_path("com/example/maven-metadata.xml").expect("ok");
+        assert_eq!(p.coordinate.group_id, "com");
+        assert_eq!(p.coordinate.artifact_id, "example");
+        assert!(matches!(
+            p.class,
+            PathClass::Metadata {
+                version_level: false,
+                checksum: None
+            }
+        ));
+    }
+
+    #[test]
+    fn four_segment_artifact_path_is_accepted() {
+        // Minimal artifact path with exactly four segments. Catches the
+        // `segments.len() < 4` boundary (line 89): replacing `<` with
+        // `<=` would reject this valid four-segment path.
+        let p = parse_layout_path("g/foo/1.0/foo-1.0.jar").expect("ok");
+        assert_eq!(p.coordinate.group_id, "g");
+        assert_eq!(p.coordinate.artifact_id, "foo");
+        assert_eq!(p.coordinate.version, "1.0");
+        assert_eq!(p.coordinate.extension, "jar");
+        assert_eq!(p.class, PathClass::Artifact);
+    }
+
+    #[test]
+    fn three_segment_artifact_path_is_rejected() {
+        // Exactly three non-metadata segments must fail the line-89
+        // `< 4` guard. With `<` the path is rejected; with `==` (3 == 4
+        // is false) it would slip through and fail later with a
+        // different message, so assert the exact "fewer than 4" wording.
+        let err = parse_layout_path("foo/1.0/foo-1.0.jar").expect_err("reject");
+        assert!(
+            err.to_string().contains("fewer than 4 segments"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn deep_version_level_metadata_resolves_group_and_artifact() {
+        // before_file has six entries, so `len - 2 = 4` differs from
+        // `len / 2 = 3`. Asserting the exact artifactId / groupId catches
+        // the `- 2` → `/ 2` subtraction mutants (lines 131 & 132): the
+        // mutant would pick `before_file[3]` ("d") as the artifactId and
+        // `a.b.c` as the groupId.
+        let p =
+            parse_layout_path("a/b/c/d/foo/1.0-SNAPSHOT/maven-metadata.xml").expect("ok");
+        assert_eq!(p.coordinate.artifact_id, "foo");
+        assert_eq!(p.coordinate.group_id, "a.b.c.d");
+        assert_eq!(p.coordinate.version, "1.0-SNAPSHOT");
+        assert!(matches!(
+            p.class,
+            PathClass::Metadata {
+                version_level: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn empty_classifier_with_extension_is_rejected() {
+        // Filename `foo-1.0-.jar` yields tail `.jar`, i.e. an empty
+        // classifier with a non-empty extension. The `is_empty() ||
+        // is_empty()` guard in `split_classifier_and_extension` must
+        // reject it; an `&&` mutant would accept an empty classifier.
+        let err = parse_layout_path("g/foo/1.0/foo-1.0-.jar").expect_err("reject");
+        assert!(
+            err.to_string().contains("classifier.extension"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn layout_is_snapshot_reflects_version() {
+        // Pin both truth values so the function body cannot be replaced
+        // by a constant `true` or `false`.
+        let snap = parse_layout_path(
+            "com/example/foo/1.0-SNAPSHOT/foo-1.0-SNAPSHOT.jar",
+        )
+        .expect("ok");
+        assert!(layout_is_snapshot(&snap));
+
+        let release = parse_layout_path("com/example/foo/1.0/foo-1.0.jar").expect("ok");
+        assert!(!layout_is_snapshot(&release));
+    }
 
     #[test]
     fn parses_simple_jar_path() {

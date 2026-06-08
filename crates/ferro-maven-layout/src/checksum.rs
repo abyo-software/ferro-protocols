@@ -132,6 +132,50 @@ mod tests {
     use super::{ChecksumAlgo, compute_checksum, parse_sidecar};
 
     #[test]
+    fn from_extension_maps_every_known_algo() {
+        // Each arm is asserted explicitly so deleting any one match arm
+        // in `from_extension` is caught by mutation testing.
+        assert_eq!(ChecksumAlgo::from_extension("md5"), Some(ChecksumAlgo::Md5));
+        assert_eq!(
+            ChecksumAlgo::from_extension("sha1"),
+            Some(ChecksumAlgo::Sha1)
+        );
+        assert_eq!(
+            ChecksumAlgo::from_extension("sha256"),
+            Some(ChecksumAlgo::Sha256)
+        );
+        assert_eq!(
+            ChecksumAlgo::from_extension("sha512"),
+            Some(ChecksumAlgo::Sha512)
+        );
+        // Anything else (including the dotted form or an unknown algo)
+        // returns `None`.
+        assert_eq!(ChecksumAlgo::from_extension("sha384"), None);
+        assert_eq!(ChecksumAlgo::from_extension(".md5"), None);
+        assert_eq!(ChecksumAlgo::from_extension(""), None);
+    }
+
+    #[test]
+    fn extension_round_trips_with_from_extension() {
+        for algo in [
+            ChecksumAlgo::Md5,
+            ChecksumAlgo::Sha1,
+            ChecksumAlgo::Sha256,
+            ChecksumAlgo::Sha512,
+        ] {
+            assert_eq!(ChecksumAlgo::from_extension(algo.extension()), Some(algo));
+        }
+    }
+
+    #[test]
+    fn hex_len_matches_each_algo() {
+        assert_eq!(ChecksumAlgo::Md5.hex_len(), 32);
+        assert_eq!(ChecksumAlgo::Sha1.hex_len(), 40);
+        assert_eq!(ChecksumAlgo::Sha256.hex_len(), 64);
+        assert_eq!(ChecksumAlgo::Sha512.hex_len(), 128);
+    }
+
+    #[test]
     fn sha1_of_abc_is_known_vector() {
         let hex = compute_checksum(ChecksumAlgo::Sha1, b"abc").expect("sha1");
         assert_eq!(hex, "a9993e364706816aba3e25717850c26c9cd0d89d");

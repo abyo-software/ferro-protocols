@@ -386,6 +386,41 @@ mod tests {
     }
 
     #[test]
+    fn missing_artifact_id_is_rejected() {
+        // groupId present, artifactId absent. The `is_empty() ||
+        // is_empty()` guard must reject this; an `&&` mutant would
+        // accept it because only one operand is true.
+        let xml = "<metadata><groupId>com.example</groupId></metadata>";
+        let err = MavenMetadata::from_xml(xml).expect_err("reject missing artifactId");
+        assert!(
+            err.to_string().contains("missing groupId or artifactId"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn missing_group_id_is_rejected() {
+        // artifactId present, groupId absent — the symmetric case.
+        let xml = "<metadata><artifactId>foo</artifactId></metadata>";
+        let err = MavenMetadata::from_xml(xml).expect_err("reject missing groupId");
+        assert!(
+            err.to_string().contains("missing groupId or artifactId"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn both_group_and_artifact_present_is_accepted() {
+        // Sanity counterpart: when both are present the guard must let
+        // the document through, so the `&&` mutant is not vacuously
+        // satisfied by every input failing.
+        let xml = "<metadata><groupId>com.example</groupId><artifactId>foo</artifactId></metadata>";
+        let md = MavenMetadata::from_xml(xml).expect("accept");
+        assert_eq!(md.group_id, "com.example");
+        assert_eq!(md.artifact_id, "foo");
+    }
+
+    #[test]
     fn malformed_xml_fails() {
         let err = MavenMetadata::from_xml("<metadata><artifactId>oops")
             .expect_err("reject truncated metadata");
