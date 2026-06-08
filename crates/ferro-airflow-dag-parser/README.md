@@ -3,7 +3,8 @@
 
 [![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](../../LICENSE)
 [![crates.io](https://img.shields.io/crates/v/ferro-airflow-dag-parser.svg)](https://crates.io/crates/ferro-airflow-dag-parser)
-[![docs.rs](https://docs.rs/ferro-airflow-dag-parser/badge.svg)](https://docs.rs/ferro-airflow-dag-parser)
+[![docs.rs](https://img.shields.io/docsrs/ferro-airflow-dag-parser)](https://docs.rs/ferro-airflow-dag-parser)
+[![CI](https://github.com/abyo-software/ferro-protocols/actions/workflows/ci.yml/badge.svg)](https://github.com/abyo-software/ferro-protocols/actions/workflows/ci.yml)
 [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](../../rust-toolchain.toml)
 
 Static, AST-based extractor for **Apache Airflow™** Python DAG files.

@@ -3,7 +3,8 @@
 
 [![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](../../LICENSE)
 [![crates.io](https://img.shields.io/crates/v/ferro-lumberjack.svg)](https://crates.io/crates/ferro-lumberjack)
-[![docs.rs](https://docs.rs/ferro-lumberjack/badge.svg)](https://docs.rs/ferro-lumberjack)
+[![docs.rs](https://img.shields.io/docsrs/ferro-lumberjack)](https://docs.rs/ferro-lumberjack)
+[![CI](https://github.com/abyo-software/ferro-protocols/actions/workflows/ci.yml/badge.svg)](https://github.com/abyo-software/ferro-protocols/actions/workflows/ci.yml)
 [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](../../rust-toolchain.toml)
 
 Rust primitives for the **Logstash Lumberjack v2** wire protocol — the

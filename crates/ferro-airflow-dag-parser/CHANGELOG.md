@@ -8,6 +8,10 @@ separate `v0.2.0`.
 
 ## [Unreleased]
 
+### Documentation
+- Added a CI status badge to the README and normalised the docs.rs badge
+  to the `img.shields.io/docsrs` form.
+
 ### Added
 - `tests/fixtures/example_bash_operator.py` and `tests/fixtures/tutorial.py`
   — vendored verbatim from `apache/airflow/airflow/example_dags/`

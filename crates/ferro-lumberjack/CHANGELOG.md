@@ -12,6 +12,10 @@ public items.
 
 ## [Unreleased]
 
+### Documentation
+- Added a CI status badge to the README and normalised the docs.rs badge
+  to the `img.shields.io/docsrs` form.
+
 ### Added
 - `tests/fixtures/beats_filebeat_window_v2.bin` and
   `tests/fixtures/logstash_ack_v2.bin` — realistic-synthetic Lumberjack
