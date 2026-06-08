@@ -2,11 +2,37 @@
 # Changelog — ferro-oci-server
 
 The format is based on
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The crate
-is on the `v0.1.x` beta track; additive changes only between minor
-releases. Breaking changes will be released as a separate `v0.2.0`.
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/). From
+`v1.0.0` onward this crate follows strict
+[Semantic Versioning](https://semver.org/): breaking changes to the
+public API require a major bump.
 
 ## [Unreleased]
+
+## [1.0.0] - 2026-06-08
+
+First semver-stable release; the public API is committed under semver.
+This release turns the OCI Distribution Spec v1.1 server primitives into
+a runnable server: a `ferro-oci-server` binary, Prometheus `/metrics`,
+Kubernetes probes, and **durable registry metadata persistence**
+(manifests, tags, and referrers survive a restart, with content-
+addressing verified on load). It adds digest-verified manifest `PUT`,
+bounded upload sessions (count cap + idle TTL), an explicit 512 MiB body
+limit, atomic manifest+referrer transactions, and referrer-descriptor
+pruning on delete. **The server passes the official
+`opencontainers/distribution-spec` v1.1 conformance suite: 75/75 specs
+(Push, Pull, Content Discovery, Content Management), 0 failures.**
+Backed by mutation/coverage hardening and a 6-round adversarial design-
+review pass (GA gate, 0 P0/P1).
+
+### Stabilization
+- API stabilized at `1.0.0` under strict semver. The `router` /
+  `build_app` / `build_app_persisted` surface, the `RegistryMeta` trait
+  and `InMemoryRegistryMeta`, the manifest / reference / media-type
+  types, and `OciError` are now committed. Test suite hardened to a
+  ≥95% mutation kill rate and ≥85% line coverage; workspace clippy
+  pedantic + nursery clean under `-D warnings` with
+  `unsafe_code = forbid`; `cargo audit` / `cargo deny` clean.
 
 ### Security
 - **Manifest `PUT` by digest now verifies the digest matches the body.**
@@ -189,6 +215,7 @@ Initial extraction from FerroRepo's OCI protocol crate.
   `v0.0.x` follow-ups; the trait is stable enough that you can
   implement your own today.
 
-[Unreleased]: https://github.com/abyo-software/ferro-protocols/compare/ferro-oci-server-v0.1.0...HEAD
+[Unreleased]: https://github.com/abyo-software/ferro-protocols/compare/ferro-oci-server-v1.0.0...HEAD
+[1.0.0]: https://github.com/abyo-software/ferro-protocols/compare/ferro-oci-server-v0.1.0...ferro-oci-server-v1.0.0
 [0.1.0]: https://github.com/abyo-software/ferro-protocols/releases/tag/ferro-oci-server-v0.1.0
 [0.0.1]: https://github.com/abyo-software/ferro-protocols/releases/tag/ferro-oci-server-v0.0.1

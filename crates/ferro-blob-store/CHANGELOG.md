@@ -2,15 +2,38 @@
 # Changelog — ferro-blob-store
 
 The format is based on
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/). This crate
-is currently in the `v0.0.x` alpha series; breaking changes are
-allowed between any two releases until `v0.1.0`.
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/). From
+`v1.0.0` onward this crate follows strict
+[Semantic Versioning](https://semver.org/): breaking changes to the
+public API require a major bump.
 
 ## [Unreleased]
+
+## [1.0.0] - 2026-06-08
+
+First semver-stable release; the public API is committed under semver.
+This is the foundation content-addressed blob store for the workspace
+(in-memory and filesystem backends). No public-API breakage versus the
+`v0.x` series — the bump is a deliberate stabilization signal backed by
+mutation/coverage hardening and a 6-round adversarial design-review pass.
+
+### Changed
+- API stabilized at `1.0.0`. The `BlobStore` trait, `Digest`,
+  `InMemoryBlobStore`, and `FsBlobStore` surfaces are now under a strict
+  semver contract; the surface is intentionally minimal so streaming
+  variants can be added additively in a future minor.
+
+### Security
+- Test suite hardened to a ≥95% mutation kill rate and ≥85% line
+  coverage; workspace clippy pedantic + nursery clean under `-D warnings`
+  with `unsafe_code = forbid`; `cargo audit` / `cargo deny` clean. Passed
+  a 6-round adversarial Codex design-review (GA gate, 0 P0/P1).
 
 ### Documentation
 - Added crates.io, docs.rs, and CI status badges to the README, which is
   also the docs.rs landing page (`#![doc = include_str!("../README.md")]`).
+- README API stability statement upgraded from "beta" to "stable
+  (`v1.x`)".
 
 ## [0.1.0] — 2026-05-04
 
@@ -68,7 +91,8 @@ Initial extraction from the FerroRepo storage layer.
   backend, layout `<root>/<algo>/<2-char-prefix>/<rest-of-hex>`.
 - `BlobStoreError` enum (Io, Digest, NotFound, InvalidDigest).
 
-[Unreleased]: https://github.com/abyo-software/ferro-protocols/compare/ferro-blob-store-v0.1.0...HEAD
+[Unreleased]: https://github.com/abyo-software/ferro-protocols/compare/ferro-blob-store-v1.0.0...HEAD
+[1.0.0]: https://github.com/abyo-software/ferro-protocols/compare/ferro-blob-store-v0.1.0...ferro-blob-store-v1.0.0
 [0.1.0]: https://github.com/abyo-software/ferro-protocols/releases/tag/ferro-blob-store-v0.1.0
 [0.0.3]: https://github.com/abyo-software/ferro-protocols/releases/tag/ferro-blob-store-v0.0.3
 [0.0.2]: https://github.com/abyo-software/ferro-protocols/releases/tag/ferro-blob-store-v0.0.2

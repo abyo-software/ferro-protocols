@@ -12,6 +12,16 @@ public items.
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-06-08
+
+First semver-stable release; the public API is committed under semver.
+`ferro-lumberjack` provides the Lumberjack / Beats v2 frame codec, an
+async Tokio client, an async server, and TLS for both directions. This
+release closes an unbounded per-window memory-accumulation DoS and lands
+the upstream-wire conformance suite, backed by mutation/coverage
+hardening and a 6-round adversarial design-review pass (GA gate,
+0 P0/P1).
+
 ### Security
 - **Server: bound per-window memory accumulation (DoS hardening).**
   `ServerConnection::read_window` previously trusted the peer-supplied
@@ -50,6 +60,15 @@ public items.
   event field shape (`@timestamp`, `beat`, `log.file.path`, `log.offset`),
   exercise 1-byte-per-feed split-feed equivalence, and assert the
   raw header bytes match the Lumberjack v2 spec.
+
+### Changed
+- API stabilized at `1.0.0` under strict semver. No public-API breakage
+  versus `v0.2.0`; the `frame` codec, `client`, `server`, and `tls`
+  surfaces are now committed. The test suite was hardened to a ≥95%
+  mutation kill rate and ≥85% line coverage; workspace clippy pedantic +
+  nursery clean under `-D warnings` with `unsafe_code = forbid`;
+  `cargo audit` / `cargo deny` clean; passed a 6-round adversarial Codex
+  design-review (GA gate, 0 P0/P1).
 
 ## [0.2.0] — 2026-05-04
 
@@ -165,7 +184,8 @@ standalone crate.
 - No `BatchSink` trait abstraction; clients must call `send_json`
   with explicit `Vec<Vec<u8>>` batches.
 
-[Unreleased]: https://github.com/abyo-software/ferro-protocols/compare/ferro-lumberjack-v0.2.0...HEAD
+[Unreleased]: https://github.com/abyo-software/ferro-protocols/compare/ferro-lumberjack-v1.0.0...HEAD
+[1.0.0]: https://github.com/abyo-software/ferro-protocols/compare/ferro-lumberjack-v0.2.0...ferro-lumberjack-v1.0.0
 [0.2.0]: https://github.com/abyo-software/ferro-protocols/compare/ferro-lumberjack-v0.1.0...ferro-lumberjack-v0.2.0
 [0.1.0]: https://github.com/abyo-software/ferro-protocols/compare/ferro-lumberjack-v0.0.1...ferro-lumberjack-v0.1.0
 [0.0.1]: https://github.com/abyo-software/ferro-protocols/releases/tag/ferro-lumberjack-v0.0.1

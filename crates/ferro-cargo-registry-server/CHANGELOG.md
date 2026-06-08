@@ -2,11 +2,38 @@
 # Changelog — ferro-cargo-registry-server
 
 The format is based on
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The crate
-is on the `v0.1.x` beta track; additive changes only between minor
-releases. Breaking changes will be released as a separate `v0.2.0`.
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/). From
+`v1.0.0` onward this crate follows strict
+[Semantic Versioning](https://semver.org/): breaking changes to the
+public API require a major bump.
 
 ## [Unreleased]
+
+## [1.0.0] - 2026-06-08
+
+First semver-stable release; the public API is committed under semver.
+This release turns the Cargo Alternative Registry Protocol (RFC 2789)
+primitives into a runnable server: a `ferro-cargo-registry-server`
+binary, Prometheus `/metrics`, Kubernetes probes (`/live` `/healthz`
+`/ready`), and **durable filesystem index persistence** that survives a
+restart. It adds an explicit publish body limit, version immutability
+(`409` on republish), canonical (case- and hyphen-folded) crate-name
+keying, and closes a publish-rollback orphan-blob TOCTOU. Verified
+end-to-end against the real `cargo` client (publish / fetch / yank /
+owners), and backed by mutation/coverage hardening and a 6-round
+adversarial design-review pass (GA gate, 0 P0/P1).
+
+### Stabilization
+- API stabilized at `1.0.0` under strict semver. The library surface
+  (`router()` / `instrument()`, `CargoState`, the sparse-index
+  `IndexEntry` / `render_lines` / `parse_lines` types, and `CargoError`)
+  is now committed. Test suite hardened to a ≥95% mutation kill rate and
+  ≥85% line coverage; workspace clippy pedantic + nursery clean under
+  `-D warnings` with `unsafe_code = forbid`; `cargo audit` /
+  `cargo deny` clean.
+- Crate names are keyed canonically (case- and hyphen-folded) so
+  `Foo_Bar` and `foo-bar` resolve to the same crate, matching crates.io
+  collision semantics.
 
 ### Added
 - **Durable index persistence (DD R2-6).** The filesystem-backed binary
@@ -147,6 +174,7 @@ Initial extraction from FerroRepo's Cargo protocol crate.
 - Sparse index only. Git index returns 501 (`NotImplemented`).
 - Auth is open in this crate — layer your own middleware.
 
-[Unreleased]: https://github.com/abyo-software/ferro-protocols/compare/ferro-cargo-registry-server-v0.1.0...HEAD
+[Unreleased]: https://github.com/abyo-software/ferro-protocols/compare/ferro-cargo-registry-server-v1.0.0...HEAD
+[1.0.0]: https://github.com/abyo-software/ferro-protocols/compare/ferro-cargo-registry-server-v0.1.0...ferro-cargo-registry-server-v1.0.0
 [0.1.0]: https://github.com/abyo-software/ferro-protocols/releases/tag/ferro-cargo-registry-server-v0.1.0
 [0.0.1]: https://github.com/abyo-software/ferro-protocols/releases/tag/ferro-cargo-registry-server-v0.0.1

@@ -2,15 +2,33 @@
 # Changelog — ferro-airflow-dag-parser
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
-This crate is on the `v0.1.x` beta track; additive changes only
-between minor releases. Breaking changes will be released as a
-separate `v0.2.0`.
+From `v1.0.0` onward this crate follows strict
+[Semantic Versioning](https://semver.org/): breaking changes to the
+public API require a major bump.
 
 ## [Unreleased]
 
-### Documentation
-- Added a CI status badge to the README and normalised the docs.rs badge
-  to the `img.shields.io/docsrs` form.
+## [1.0.0] - 2026-06-08
+
+First semver-stable release; the public API is committed under semver.
+This crate statically extracts Apache Airflow DAG structure from Python
+source via an AST (ruff backend) with no CPython evaluation, and is
+panic-shielded against the parser. No public-API breakage versus the
+`v0.x` series — the bump is a stabilization signal backed by
+mutation/coverage hardening and a 6-round adversarial design-review pass.
+
+### Changed
+- API stabilized at `1.0.0` under strict semver. The `extract_static_dag`
+  / `extract_all_static_dags` surface, `ExtractedDag`, the validated
+  `DagId` / `TaskId` newtypes, the `#[non_exhaustive]` error enums, and
+  the `dynamic_markers` detectors are now committed.
+
+### Security
+- Parser invocation remains panic-shielded. Test suite hardened to a
+  ≥95% mutation kill rate and ≥85% line coverage; workspace clippy
+  pedantic + nursery clean under `-D warnings` with
+  `unsafe_code = forbid`; `cargo audit` / `cargo deny` clean; passed a
+  6-round adversarial Codex design-review (GA gate, 0 P0/P1).
 
 ### Added
 - `tests/fixtures/example_bash_operator.py` and `tests/fixtures/tutorial.py`
@@ -26,6 +44,12 @@ separate `v0.2.0`.
   and presence of the canonical fan-out edge `runme_0 →
   run_after_loop`. Closes the "vendor real Airflow DAGs" remark from
   the 0.0.1 → 0.1.0 promotion notes.
+
+### Documentation
+- Added a CI status badge to the README and normalised the docs.rs badge
+  to the `img.shields.io/docsrs` form.
+- README API stability statement upgraded from "beta" to "stable
+  (`v1.x`)".
 
 ## [0.1.0] — 2026-05-04
 
@@ -88,6 +112,7 @@ Initial extraction from FerroAir into a standalone crate.
 - Identifier validation uses `chars().count()` (not byte length) to
   match the upstream Python implementation.
 
-[Unreleased]: https://github.com/abyo-software/ferro-protocols/compare/ferro-airflow-dag-parser-v0.1.0...HEAD
+[Unreleased]: https://github.com/abyo-software/ferro-protocols/compare/ferro-airflow-dag-parser-v1.0.0...HEAD
+[1.0.0]: https://github.com/abyo-software/ferro-protocols/compare/ferro-airflow-dag-parser-v0.1.0...ferro-airflow-dag-parser-v1.0.0
 [0.1.0]: https://github.com/abyo-software/ferro-protocols/releases/tag/ferro-airflow-dag-parser-v0.1.0
 [0.0.1]: https://github.com/abyo-software/ferro-protocols/releases/tag/ferro-airflow-dag-parser-v0.0.1
