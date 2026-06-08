@@ -167,6 +167,51 @@ async fn storage_blob_gauge_increments_on_put_and_decrements_on_delete() {
     assert_eq!(storage_blobs_value(&body), 1, "after one delete");
 }
 
+/// R2-4 regression: the `ferrooci_storage_blobs` gauge tracks *distinct*
+/// blobs currently held. PUTting the same digest twice must increment it
+/// exactly once; a single later delete must then return it to 0 (not -ve
+/// and not stuck at 1). Previously the gauge incremented on every PUT,
+/// over-counting duplicates and contradicting the "distinct blobs" help.
+#[tokio::test]
+async fn storage_blob_gauge_does_not_double_count_duplicate_put() {
+    let app = instrumented_app();
+
+    // Start at 0.
+    let (_, body) = body_string(&app, "/metrics").await;
+    assert_eq!(storage_blobs_value(&body), 0, "empty store");
+
+    // Push the SAME blob twice → still one distinct blob → gauge is 1.
+    let d = put_blob(&app, b"duplicate-blob").await;
+    let d_again = put_blob(&app, b"duplicate-blob").await;
+    assert_eq!(d, d_again, "same payload yields same digest");
+    let (_, body) = body_string(&app, "/metrics").await;
+    assert_eq!(
+        storage_blobs_value(&body),
+        1,
+        "duplicate put must not double-count distinct blobs"
+    );
+
+    // Delete the (single) blob once → gauge back to 0.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri(format!("/v2/repo/blobs/{d}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("delete blob");
+    assert_eq!(resp.status(), StatusCode::ACCEPTED, "blob delete");
+    let (_, body) = body_string(&app, "/metrics").await;
+    assert_eq!(
+        storage_blobs_value(&body),
+        0,
+        "after deleting the one distinct blob the gauge must be 0, not 1"
+    );
+}
+
 /// F7 regression: `/metrics` requests are themselves counted under the
 /// `metrics` handler label — the middleware is layered *over* the merged
 /// `/metrics` route, not under it.

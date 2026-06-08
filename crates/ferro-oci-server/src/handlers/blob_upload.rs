@@ -121,10 +121,21 @@ pub async fn init_upload(
             )
             .into_response();
         }
+        // R2-4: the storage_blobs gauge counts *distinct* blobs currently
+        // held. Re-PUTting an already-present digest is a no-op for the
+        // content-addressed store, so it must not bump the gauge — a later
+        // single delete would otherwise drive it below the true count.
+        // Probe existence before the put and only increment on a genuinely
+        // new digest. (Small TOCTOU window between contains/put is benign:
+        // the gauge is documented best-effort, and a concurrent insert of
+        // the same digest at worst double-counts a single blob.)
+        let already_present = state.blob_store.contains(&digest).await.unwrap_or(false);
         if let Err(e) = state.blob_store.put(&digest, body).await {
             return OciError::from(e).into_response();
         }
-        state.inc_blob_count();
+        if !already_present {
+            state.inc_blob_count();
+        }
         return blob_created_response(name, &digest);
     }
 
@@ -331,10 +342,16 @@ pub async fn finish_upload(
         .into_response();
     }
 
+    // R2-4: only bump the distinct-blobs gauge when this digest is newly
+    // inserted; a duplicate finalize of an already-present blob is a no-op
+    // for the store. See the monolithic path in `init_upload` for details.
+    let already_present = state.blob_store.contains(&declared).await.unwrap_or(false);
     if let Err(e) = state.blob_store.put(&declared, bytes).await {
         return OciError::from(e).into_response();
     }
-    state.inc_blob_count();
+    if !already_present {
+        state.inc_blob_count();
+    }
     if let Err(e) = state.registry.complete_upload(name, uuid, &declared).await {
         return OciError::from(e).into_response();
     }
