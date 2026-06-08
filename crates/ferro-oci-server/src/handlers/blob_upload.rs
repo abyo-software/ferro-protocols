@@ -188,8 +188,18 @@ pub async fn patch_upload(
             // the chunk actually carried in the body. A request claiming
             // `0-999999` while sending one byte is malformed and, left
             // unchecked, lets a client lie about its offsets. The
-            // inclusive length is `end - start + 1`.
-            let declared_len = range.length();
+            // inclusive length is `end - start + 1`; the degenerate
+            // `0-u64::MAX` range overflows that arithmetic, so we reject
+            // it outright (a wrapped `0` would otherwise let an empty
+            // body claim a full-range span).
+            let Some(declared_len) = range.checked_length() else {
+                return OciError::new(
+                    OciErrorCode::BlobUploadInvalid,
+                    format!("Content-Range `{s}` spans more than u64::MAX bytes"),
+                )
+                .with_status(StatusCode::RANGE_NOT_SATISFIABLE)
+                .into_response();
+            };
             if declared_len != body.len() as u64 {
                 return OciError::new(
                     OciErrorCode::BlobUploadInvalid,

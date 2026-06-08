@@ -134,10 +134,35 @@ impl ContentRange {
         Ok(Self { start, end })
     }
 
+    /// Inclusive byte length, or `None` when the span overflows `u64`.
+    ///
+    /// The inclusive length is `end - start + 1`. For the degenerate
+    /// range `0-u64::MAX` this is `u64::MAX + 1`, which overflows: in a
+    /// debug build the naive `end - start + 1` panics, and in release it
+    /// wraps to `0`, letting an empty `PATCH` body claim a full-range
+    /// span (`0` bytes "==" a `0`-length body). We compute with
+    /// `checked_*` so callers can reject the overflowing range as
+    /// `BLOB_UPLOAD_INVALID` rather than crash or mis-validate.
+    #[must_use]
+    pub const fn checked_length(self) -> Option<u64> {
+        match self.end.checked_sub(self.start) {
+            Some(span) => span.checked_add(1),
+            None => None,
+        }
+    }
+
     /// Inclusive byte length.
+    ///
+    /// Saturates at `u64::MAX` when the true inclusive length would
+    /// overflow (the `0-u64::MAX` edge). Prefer [`Self::checked_length`]
+    /// when the overflow must be surfaced as an error; this convenience
+    /// accessor never panics and never wraps to `0`.
     #[must_use]
     pub const fn length(self) -> u64 {
-        self.end - self.start + 1
+        match self.checked_length() {
+            Some(len) => len,
+            None => u64::MAX,
+        }
     }
 }
 
@@ -205,5 +230,22 @@ mod tests {
     fn content_range_rejects_garbage() {
         assert!(ContentRange::parse("not-a-range").is_err());
         assert!(ContentRange::parse("").is_err());
+    }
+
+    #[test]
+    fn checked_length_handles_full_u64_range_without_overflow() {
+        // R2-2: `0-u64::MAX` would overflow `end - start + 1`. In debug
+        // this panics; in release it wraps to 0. `checked_length` must
+        // return `None` (the caller rejects), and the panicking `length`
+        // accessor must saturate rather than wrap.
+        let r = ContentRange::parse(&format!("0-{}", u64::MAX)).expect("parse full range");
+        assert_eq!(r.checked_length(), None, "full-u64 span has no exact length");
+        assert_eq!(r.length(), u64::MAX, "length() saturates, never wraps to 0");
+    }
+
+    #[test]
+    fn checked_length_normal_range_is_exact() {
+        let r = ContentRange::parse("0-1023").expect("parse");
+        assert_eq!(r.checked_length(), Some(1024));
     }
 }

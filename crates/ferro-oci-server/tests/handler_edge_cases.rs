@@ -277,6 +277,29 @@ async fn patch_malformed_content_range_returns_400() {
 }
 
 #[tokio::test]
+async fn patch_full_u64_content_range_with_empty_body_rejected_no_panic() {
+    // R2-2: `Content-Range: 0-18446744073709551615` (0-u64::MAX) makes the
+    // inclusive length `end - start + 1` overflow. In a debug build the
+    // naive arithmetic would panic; in release it wraps to 0, which would
+    // spuriously match an empty body and let the chunk "succeed". The
+    // handler must reject the range as BLOB_UPLOAD_INVALID without
+    // panicking. (Run under debug to exercise the overflow-panic path.)
+    let app = app();
+    let (_s, headers, _b) =
+        send(&app, method(Method::POST, "/v2/repo/blobs/uploads/", Body::empty())).await;
+    let location = headers[header::LOCATION].to_str().unwrap().to_owned();
+    let req = Request::builder()
+        .method(Method::PATCH)
+        .uri(&location)
+        .header(header::CONTENT_RANGE, format!("0-{}", u64::MAX))
+        .body(Body::empty())
+        .expect("req");
+    let (status, _h, body) = send(&app, req).await;
+    assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_error_code(&body, "BLOB_UPLOAD_INVALID");
+}
+
+#[tokio::test]
 async fn finish_upload_missing_digest_param_returns_400() {
     let app = app();
     let (_s, headers, _b) =
