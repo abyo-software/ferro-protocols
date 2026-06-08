@@ -23,13 +23,28 @@ conflict with the concurrent session — explicitly disallowed by the task).
 
 ## Result
 
-- **61 missed mutants killed** via public-API integration tests (added in
-  `tests/mutation_guard.rs`, 45 tests).
-- **6 missed mutants classified by-design** as un-killable from integration
-  tests without a source-visibility change (see below).
+- **Wave 1** added 45 tests and killed most mutants, but a `cargo mutants`
+  re-run showed it actually reached only **91.1 % (21 missed of 235 viable)**:
+  15 DAG-detection-helper mutants survived because Wave 1's negatives did not
+  distinguish the helper under test from an always-`true` mutant (e.g. the
+  `is_dag_callable -> true` negatives drove `extract_*` — the *ruff_impl* copy —
+  not `dynamic_markers_for`; the `is_task_decorator -> true` negative used an
+  *un-decorated* helper so `any(...)` was vacuously false either way; the
+  `@task(...)` Call decorator form and the bare `@dag` Name form were never
+  exercised).
+- **Wave 2** (this document) adds **15 targeted tests** that each pair a
+  positive with a shape-matched negative on the *exact* helper + API path, and
+  every one of the 15 was verified to KILL its mutant by transiently applying
+  the mutation to a throwaway copy of the source and confirming the test fails
+  (source restored byte-identical via `git checkout` — no library edit).
+- **6 missed mutants remain classified by-design** as un-killable from
+  integration tests without a source-visibility change (see below): 4 dead-code
+  `line_index.rs:75` constants + 2 non-deterministic `panic_safe.rs:180`
+  upstream-panic-only constants.
 
-Projected kill after this wave: (235 − 67 + 61) / 235 = **229 / 235 ≈ 97.4 %**,
-with the residual 6 (2.6 %) being the by-design private-unreachable set.
+Projected kill after Wave 2: (214 killed + 15) / 235 = **229 / 235 ≈ 97.4 %**,
+with the residual 6 (2.6 %) being the by-design private-unreachable set
+(91.1 % → 97.4 %, clearing the ≥95 % target).
 
 ---
 
@@ -145,6 +160,80 @@ mixing.
 - `500 render_fstring → String::new() / "xyzzy"`:
   `fstring_task_id_marker_reports_exact_line_and_rendering` asserts the exact
   rendering `t_{…}`.
+
+---
+
+## Wave 2 — the 15 surviving DAG-detection-helper mutants (all KILLED)
+
+These 15 survived Wave 1. The fix in each case is a negative whose syntactic
+shape forces the helper-under-test to return a DIFFERENT result for the
+original vs the mutant, on the SAME API path the mutant lives on. Each kill was
+verified empirically (mutate throwaway copy → test FAILS → restore).
+
+### dynamic_markers.rs — helpers reached ONLY via `dynamic_markers_for` (10)
+
+These are a SEPARATE copy of the identically-named helpers in `ruff_impl.rs`.
+Wave 1's `extract_*`-driven negatives killed the *ruff_impl* copy but left this
+copy alive. All Wave-2 tests here drive `dynamic_markers_for`. The observable is
+whether a marker fires, which depends on `in_dag_ctx` (opened by the DAG/decorator
+detectors) and on the chain/task detectors.
+
+- `410 visit_call_args -> ()`: `dyn_nested_chain_splat_in_call_args_is_reached_by_recursion`
+  — `register(chain(*items))` nests the splat inside another call's args; only the
+  `visit_call_args` recursion reaches it, so dropping the recursion drops the marker.
+- `420 is_dag_callable -> true`: `dyn_non_dag_with_block_does_not_open_dag_context`
+  — `with open("f"): chain(*items)` must NOT flag (non-DAG `with` keeps ctx 0); the
+  mutant opens ctx for every `with` callee. Positive companion: bare `with DAG(...)`.
+- `422 delete Attribute arm (is_dag_callable)`: `dyn_dag_callable_via_attribute_opens_context`
+  — `with airflow.DAG(...): chain(*items)` must flag; deleting the Attribute arm leaves
+  ctx at 0.
+- `428 match_dag_decorator -> true`: `dyn_non_dag_decorator_does_not_open_dag_context`
+  — `@functools.cache def helper(): chain(*items)` must NOT flag; mutant opens ctx for any
+  decorated fn. Positive: `@dag` Name decorator.
+- `431 delete Attribute arm (match_dag_decorator)`: `dyn_dag_decorator_via_attribute_opens_context`
+  — `@airflow.dag(...)` must open ctx; deleting the Attribute arm drops it.
+- `440 callee_is_chain_helper -> true`: `dyn_non_chain_splat_call_inside_dag_is_not_flagged`
+  — `schedule_tasks(*items)` inside a DAG must NOT flag ChainSplat; mutant flags every
+  splat call. Positive: real `chain(*items)`.
+- `457 is_task_decorator_call -> true`: `dyn_non_task_decorator_call_does_not_flag_taskflow`
+  — `@retrying(3)` (a non-task decorator, but with a POSITIONAL arg so
+  `task_decorator_is_dynamic` is TRUE — this is essential so the `&&` cannot mask the
+  mutant) must NOT flag UnsupportedTaskFlow.
+- `460 delete Attribute arm (is_task_decorator_call inner)`: `dyn_task_decorator_call_via_attribute_flags_taskflow`
+  — `@sdk.task("grp")` (attr == "task", positional arg ⇒ dynamic) must flag; deleting the
+  Attribute arm makes `inner` return None. Negative companion `@app.helper("grp")`.
+- `461 delete Call arm (is_task_decorator_call inner)`: `dyn_task_decorator_call_via_call_callee_flags_taskflow`
+  — `@task()(expand=True)` (decorator func is itself a Call) must flag; deleting the Call
+  arm makes `inner` return None for that shape.
+- `471 task_decorator_is_dynamic -> true`: `dyn_zero_arg_task_decorator_call_is_not_dynamic`
+  — `@task()` (a Call but with no args / no expand|partial) must NOT flag; the mutant
+  treats it as dynamic. Positive companion `@task(expand=True)`. (Wave 1's bare `@task`
+  is a Name, not a Call, so `visit_decorator_list`'s `if let Expr::Call` guard skips it
+  and the `-> true` branch is never reached — only an empty-arg CALL exercises it.)
+
+### ruff_impl.rs — static-extractor decorator detection via `extract_*` (5)
+
+Wave 1 only used the bare-Name and Attribute-Call decorator forms; these add the
+missing forms so each match guard / arm is load-bearing.
+
+- `362 match guard contains(id) -> false` (bare-Name `@dag` arm):
+  `ruff_bare_name_dag_decorator_registers_dag` — a BARE `@dag` (no parens) must register
+  a DAG. Wave 1 only used the `@dag(...)`/`@airflow.dag(...)` CALL forms (lines 366/370).
+- `366 match guard contains(id) -> true` (Name-Call arm):
+  `ruff_non_dag_name_call_decorator_is_ignored` — `@retry(times=3)` (a Name CALL not in
+  DAG_DECORATOR_NAMES) must NOT register a DAG. Wave 1's only Name-Call negative was an
+  *Attribute* (`@functools.cache`), so it didn't pin this arm.
+- `370 match guard contains(attr) -> true` (Attribute-Call arm):
+  `ruff_non_dag_attribute_call_decorator_is_ignored` — `@app.task(bind=True)` (attr not
+  `dag`) must NOT register a DAG.
+- `381 is_task_decorator -> true`: `ruff_non_task_decorated_function_in_dag_is_not_a_task`
+  — a `@staticmethod`-decorated function inside a `@dag` body must NOT become a task.
+  Wave 1's negative used an UN-decorated function (empty decorator list ⇒ `any(...)`
+  false regardless of the mutant), so it never killed `-> true`.
+- `385 delete Call arm (is_task_decorator inner_name)`: `ruff_task_decorator_call_form_registers_task`
+  — `@task(multiple_outputs=True)` (the Call decorator form) must register the task;
+  deleting the Call arm makes `inner_name` return None. Wave 1 used only bare `@task` /
+  `@airflow.task` (Name / Attribute arms).
 
 ---
 

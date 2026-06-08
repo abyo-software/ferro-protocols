@@ -910,6 +910,447 @@ chain(*items)
 }
 
 // ===========================================================================
+// dynamic_markers.rs — second-wave targeted negatives for the DAG-detection
+// helpers reached ONLY via `dynamic_markers_for` (these helpers are a
+// SEPARATE copy from the identically-named ones in ruff_impl.rs; the
+// `extract_*` tests above kill the ruff_impl copy but leave these alive).
+// Every test pairs a positive (marker must fire) with a negative whose
+// shape looks similar but must NOT fire, so an always-`true` detector or a
+// deleted match arm changes the asserted marker set.
+// ===========================================================================
+
+/// Convenience: does the marker set contain a `ChainSplat`?
+fn has_chain_splat(src: &str) -> bool {
+    dynamic_markers_for(src)
+        .iter()
+        .any(|m| matches!(m, DynamicMarker::ChainSplat { .. }))
+}
+
+/// Convenience: does the marker set contain an `UnsupportedTaskFlow`?
+fn has_unsupported_taskflow(src: &str) -> bool {
+    dynamic_markers_for(src)
+        .iter()
+        .any(|m| matches!(m, DynamicMarker::UnsupportedTaskFlow { .. }))
+}
+
+#[test]
+fn dyn_non_dag_with_block_does_not_open_dag_context() {
+    // dynamic_markers::is_dag_callable (line 419). A non-DAG `with` block
+    // (`with open(...)`) whose body contains `chain(*items)` must NOT flag
+    // ChainSplat, because `is_dag_callable` returns false so in_dag_ctx
+    // stays 0. The `is_dag_callable -> true` mutant (420) would open the
+    // context for EVERY `with` callee and spuriously flag the splat.
+    let non_dag = r#"
+from airflow.models.baseoperator import chain
+
+with open("f") as fh:
+    chain(*items)
+"#;
+    assert!(
+        !has_chain_splat(non_dag),
+        "chain splat inside a non-DAG `with` must NOT flag (is_dag_callable wrongly true): {:?}",
+        dynamic_markers_for(non_dag)
+    );
+    // Positive companion: a real bare-Name `with DAG(...)` opens the
+    // context and the same splat flags — confirms the detector path is live.
+    let bare_dag = r#"
+from airflow import DAG
+from airflow.models.baseoperator import chain
+
+with DAG(dag_id="ctx"):
+    chain(*items)
+"#;
+    assert!(has_chain_splat(bare_dag), "bare DAG `with` must flag the splat");
+}
+
+#[test]
+fn dyn_dag_callable_via_attribute_opens_context() {
+    // dynamic_markers::is_dag_callable Attribute arm (line 422). A
+    // `with airflow.DAG(...)` opens the context via the Attribute arm; the
+    // contained `chain(*items)` must flag. Deleting the Attribute arm
+    // leaves in_dag_ctx at 0 and the splat would be dropped. Paired with
+    // the non-DAG negative above so `-> true` cannot satisfy both.
+    let attr_dag = r#"
+import airflow
+from airflow.models.baseoperator import chain
+
+with airflow.DAG(dag_id="via_attr"):
+    chain(*items)
+"#;
+    assert!(
+        has_chain_splat(attr_dag),
+        "attribute-callee DAG must open the context and flag the splat: {:?}",
+        dynamic_markers_for(attr_dag)
+    );
+}
+
+#[test]
+fn dyn_non_dag_decorator_does_not_open_dag_context() {
+    // dynamic_markers::match_dag_decorator (line 427). A `@functools.cache`
+    // decorated function whose body contains `chain(*items)` must NOT flag
+    // ChainSplat — the decorator is not `@dag`, so in_dag_ctx stays 0. The
+    // `match_dag_decorator -> true` mutant (428) would open the context for
+    // any decorated function and spuriously flag the splat.
+    let non_dag = r"
+import functools
+from airflow.models.baseoperator import chain
+
+@functools.cache
+def helper():
+    chain(*items)
+";
+    assert!(
+        !has_chain_splat(non_dag),
+        "chain splat under a non-@dag decorator must NOT flag (match_dag_decorator wrongly true): {:?}",
+        dynamic_markers_for(non_dag)
+    );
+    // Positive companion: a bare-Name `@dag` decorator opens the context.
+    let dag_deco = r#"
+from airflow.sdk import dag
+from airflow.models.baseoperator import chain
+
+@dag(schedule="@daily")
+def pipe():
+    chain(*items)
+"#;
+    assert!(has_chain_splat(dag_deco), "@dag decorator must open the context");
+}
+
+#[test]
+fn dyn_dag_decorator_via_attribute_opens_context() {
+    // dynamic_markers::match_dag_decorator Attribute arm (line 431). An
+    // `@airflow.dag(...)` decorator (callee inside the decorator Call is an
+    // Attribute) opens the context via the Attribute arm; the contained
+    // `chain(*items)` must flag. Deleting the Attribute arm leaves
+    // in_dag_ctx at 0 and the splat is dropped.
+    let attr_deco = r#"
+import airflow
+from airflow.models.baseoperator import chain
+
+@airflow.dag(schedule="@daily")
+def pipe():
+    chain(*items)
+"#;
+    assert!(
+        has_chain_splat(attr_deco),
+        "attribute @airflow.dag decorator must open the context and flag the splat: {:?}",
+        dynamic_markers_for(attr_deco)
+    );
+}
+
+#[test]
+fn dyn_non_chain_splat_call_inside_dag_is_not_flagged() {
+    // dynamic_markers::callee_is_chain_helper (line 439). Inside a real DAG
+    // context, a SPLAT call to a non-chain helper (`schedule_tasks(*items)`)
+    // must NOT flag ChainSplat. The `callee_is_chain_helper -> true` mutant
+    // (440) would flag every splat call regardless of callee name.
+    let src = r#"
+from airflow import DAG
+
+with DAG(dag_id="nc"):
+    schedule_tasks(*items)
+"#;
+    assert!(
+        !has_chain_splat(src),
+        "splat to a non-chain helper inside a DAG must NOT flag (callee_is_chain_helper wrongly true): {:?}",
+        dynamic_markers_for(src)
+    );
+    // Positive companion: the real `chain(*items)` in the same context flags.
+    let chain_src = r#"
+from airflow import DAG
+from airflow.models.baseoperator import chain
+
+with DAG(dag_id="nc2"):
+    chain(*items)
+"#;
+    assert!(has_chain_splat(chain_src), "real chain(*items) must flag");
+}
+
+#[test]
+fn dyn_nested_chain_splat_in_call_args_is_reached_by_recursion() {
+    // dynamic_markers::visit_call_args (line 409). Here the chain helper is
+    // nested as an ARGUMENT of an outer non-chain call:
+    // `register(chain(*items))`. Detecting the inner ChainSplat requires
+    // `visit_call_args` to recurse into the outer call's arguments. The
+    // `visit_call_args -> ()` mutant (410) drops that recursion, so the
+    // inner splat would never be visited and the marker would vanish.
+    let src = r#"
+from airflow import DAG
+from airflow.models.baseoperator import chain
+
+with DAG(dag_id="nested"):
+    register(chain(*items))
+"#;
+    assert!(
+        has_chain_splat(src),
+        "chain(*items) nested inside another call's args must be reached by recursion: {:?}",
+        dynamic_markers_for(src)
+    );
+}
+
+#[test]
+fn dyn_non_task_decorator_call_does_not_flag_taskflow() {
+    // dynamic_markers::is_task_decorator_call (line 456). Inside a `@dag`
+    // body, a NON-task decorator that is ALSO a dynamic Call (positional
+    // arg, so `task_decorator_is_dynamic` is satisfied) — `@retrying(3)` —
+    // must NOT flag UnsupportedTaskFlow, because `is_task_decorator_call`
+    // returns false. The `is_task_decorator_call -> true` mutant (457) would
+    // (combined with the satisfied dynamic check) flag this non-task
+    // decorator. The positional arg is essential: it keeps
+    // `task_decorator_is_dynamic` TRUE so the `&&` cannot mask the mutant.
+    let src = r#"
+from airflow.sdk import dag
+
+@dag(schedule="@daily")
+def pipe():
+    @retrying(3)
+    def memo(x):
+        return x
+    memo(1)
+"#;
+    assert!(
+        !has_unsupported_taskflow(src),
+        "non-task dynamic decorator call must NOT flag taskflow (is_task_decorator_call wrongly true): {:?}",
+        dynamic_markers_for(src)
+    );
+}
+
+#[test]
+fn dyn_task_decorator_call_via_attribute_flags_taskflow() {
+    // dynamic_markers::is_task_decorator_call Attribute arm (line 460).
+    // The inner resolver's Attribute arm extracts the RIGHTMOST attribute
+    // name, which must itself be a TASK_DECORATORS entry. `@sdk.task(...)`
+    // (attr == "task") is a dynamic task decorator call and must flag
+    // UnsupportedTaskFlow. Deleting the Attribute arm (inner returns None
+    // for the Attribute) drops the flag. The decorator carries a POSITIONAL
+    // arg so `task_decorator_is_dynamic` is satisfied independently of the
+    // Attribute-arm question. The negative companion below (`@app.helper`,
+    // attr not in TASK_DECORATORS) keeps the `-> Some(attr)` honest so the
+    // `-> true` mutant cannot satisfy both.
+    let src = r#"
+from airflow.sdk import dag
+
+@dag(schedule="@daily")
+def pipe():
+    @sdk.task("grp")
+    def step():
+        return "echo"
+    step()
+"#;
+    assert!(
+        has_unsupported_taskflow(src),
+        "@sdk.task(...) attribute decorator must flag taskflow (Attribute arm): {:?}",
+        dynamic_markers_for(src)
+    );
+    let non_task = r#"
+from airflow.sdk import dag
+
+@dag(schedule="@daily")
+def pipe():
+    @app.helper("grp")
+    def step():
+        return "echo"
+    step()
+"#;
+    assert!(
+        !has_unsupported_taskflow(non_task),
+        "@app.helper(...) (attr not a task decorator) must NOT flag: {:?}",
+        dynamic_markers_for(non_task)
+    );
+}
+
+#[test]
+fn dyn_task_decorator_call_via_call_callee_flags_taskflow() {
+    // dynamic_markers::is_task_decorator_call Call arm (line 461). When the
+    // decorator expression is a Call whose own func is itself a Call
+    // (`@task()(expand=True)`), the inner resolver must recurse through the
+    // Call arm to find the "task" name. Deleting the Call arm makes the
+    // inner resolver return None for that shape, dropping the flag.
+    let src = r#"
+from airflow.sdk import dag
+
+@dag(schedule="@daily")
+def pipe():
+    @task()(expand=True)
+    def step():
+        return 1
+    step()
+"#;
+    assert!(
+        has_unsupported_taskflow(src),
+        "@task()(...) call-callee decorator must flag taskflow (Call arm): {:?}",
+        dynamic_markers_for(src)
+    );
+}
+
+#[test]
+fn dyn_zero_arg_task_decorator_call_is_not_dynamic() {
+    // dynamic_markers::task_decorator_is_dynamic (line 470). A `@task()`
+    // decorator that IS a Call but has NO positional args and no
+    // expand/partial kwarg is NOT dynamic, so it must NOT flag
+    // UnsupportedTaskFlow. The `task_decorator_is_dynamic -> true` mutant
+    // (471) would flag this empty-arg call as dynamic. (The existing bare
+    // `@task` test never reaches this branch because bare `@task` is a Name,
+    // not a Call, so `visit_decorator_list`'s `if let Expr::Call` guard
+    // skips it — only an empty-arg CALL exercises the `-> true` mutant.)
+    let zero_arg = r#"
+from airflow.sdk import dag, task
+
+@dag(schedule="@daily")
+def pipe():
+    @task()
+    def step():
+        return 1
+    step()
+"#;
+    assert!(
+        !has_unsupported_taskflow(zero_arg),
+        "@task() with no args must NOT flag taskflow (task_decorator_is_dynamic wrongly true): {:?}",
+        dynamic_markers_for(zero_arg)
+    );
+    // Positive companion: @task(expand=True) IS dynamic and must flag.
+    let dynamic = r#"
+from airflow.sdk import dag, task
+
+@dag(schedule="@daily")
+def pipe():
+    @task(expand=True)
+    def step(x):
+        return x
+    step([1])
+"#;
+    assert!(
+        has_unsupported_taskflow(dynamic),
+        "@task(expand=True) must flag taskflow"
+    );
+}
+
+// ===========================================================================
+// ruff_impl.rs — second-wave targeted negatives for decorator detection in
+// the STATIC extractor (`extract_all_static_dags`). The first-wave tests use
+// only the bare-Name and Attribute-Call decorator forms; these add the bare
+// `@dag` Name form, Name/Attribute call NEGATIVES, and the `@task(...)` Call
+// decorator form so each match guard / arm becomes load-bearing.
+// ===========================================================================
+
+#[test]
+fn ruff_bare_name_dag_decorator_registers_dag() {
+    // ruff_impl::match_dag_decorator Name-guard (line 362,
+    // `DAG_DECORATOR_NAMES.contains(id)`). A BARE `@dag` decorator (no
+    // parentheses) must register a DAG. The `contains(id) -> false` mutant
+    // (362) makes the bare-Name arm reject `@dag`, dropping the DAG. (The
+    // first-wave tests only use `@dag(...)`/`@airflow.dag(...)` CALL forms,
+    // which hit lines 366/370 — never the bare-Name arm.)
+    let src = r"
+from airflow.sdk import dag
+
+@dag
+def bare_pipeline():
+    pass
+";
+    let dags = extract_all_static_dags(src).expect("parse");
+    assert_eq!(dags.len(), 1, "bare @dag must register exactly one DAG: {dags:?}");
+    assert_eq!(dag_id_of(&dags[0]), Some("bare_pipeline"));
+}
+
+#[test]
+fn ruff_non_dag_name_call_decorator_is_ignored() {
+    // ruff_impl::match_dag_decorator Name-Call guard (line 366,
+    // `DAG_DECORATOR_NAMES.contains(id)`). A `@retry(times=3)` decorator —
+    // a bare-Name CALL whose name is NOT in DAG_DECORATOR_NAMES — must NOT
+    // register a DAG. The `contains(id) -> true` mutant (366) would treat
+    // every Name-call decorator as `@dag`.
+    let src = r"
+def retry(times):
+    def deco(fn):
+        return fn
+    return deco
+
+@retry(times=3)
+def not_a_dag():
+    pass
+";
+    let dags = extract_all_static_dags(src).expect("parse");
+    assert!(dags.is_empty(), "non-dag Name-call decorator produced a DAG: {dags:?}");
+}
+
+#[test]
+fn ruff_non_dag_attribute_call_decorator_is_ignored() {
+    // ruff_impl::match_dag_decorator Attribute-Call guard (line 370,
+    // `DAG_DECORATOR_NAMES.contains(attr)`). A `@app.task(bind=True)`
+    // decorator — an Attribute CALL whose attr is NOT `dag` — must NOT
+    // register a DAG. The `contains(attr) -> true` mutant (370) would treat
+    // every attribute-call decorator as `@dag`. (The first-wave positive
+    // `@airflow.dag(...)` exercises the true branch; this pins the false.)
+    let src = r"
+import app
+
+@app.task(bind=True)
+def celery_task():
+    pass
+";
+    let dags = extract_all_static_dags(src).expect("parse");
+    assert!(dags.is_empty(), "non-dag attribute-call decorator produced a DAG: {dags:?}");
+}
+
+#[test]
+fn ruff_non_task_decorated_function_in_dag_is_not_a_task() {
+    // ruff_impl::is_task_decorator (line 380). A function carrying a
+    // NON-task decorator (`@staticmethod`) inside a `@dag` body must NOT
+    // become a task. The `is_task_decorator -> true` mutant (381) would
+    // register every DECORATED function as a task. (The first-wave negative
+    // used an UN-decorated `def plain_helper()`, whose empty decorator list
+    // makes `any(...)` false regardless of the mutant — so it never killed
+    // `-> true`. A decorated-but-non-task function is required.)
+    let src = r#"
+from airflow.sdk import dag, task
+
+@dag(schedule="@daily")
+def pipe():
+    @task
+    def real_task():
+        pass
+    @staticmethod
+    def decorated_helper():
+        pass
+    real_task()
+"#;
+    let dag = extract_static_dag(src).expect("parse");
+    assert_eq!(
+        task_id_strings(&dag),
+        vec!["real_task"],
+        "only the @task function may register; @staticmethod must not"
+    );
+}
+
+#[test]
+fn ruff_task_decorator_call_form_registers_task() {
+    // ruff_impl::is_task_decorator Call arm (line 385,
+    // `Expr::Call(call) => inner_name(&call.func)`). A `@task(multiple_outputs=True)`
+    // decorator — the Call form — inside a `@dag` body must register the
+    // function as a task. Deleting the Call arm (385) makes `inner_name`
+    // return None for the Call shape, so the function is not registered.
+    // (The first-wave positive used bare `@task` / `@airflow.task`, i.e. the
+    // Name / Attribute arms — never the Call arm.)
+    let src = r#"
+from airflow.sdk import dag, task
+
+@dag(schedule="@daily")
+def pipe():
+    @task(multiple_outputs=True)
+    def call_form():
+        return {"a": 1}
+    call_form()
+"#;
+    let dag = extract_static_dag(src).expect("parse");
+    assert_eq!(
+        task_id_strings(&dag),
+        vec!["call_form"],
+        "@task(...) call-form decorator must register the task: {dag:?}"
+    );
+}
+
+// ===========================================================================
 // ParseCache — drives hash_source + parse_dag_file through the public type
 // ===========================================================================
 
