@@ -151,6 +151,48 @@ impl AppState {
     }
 }
 
+#[cfg(test)]
+mod app_state_tests {
+    use std::sync::Arc;
+
+    use ferro_blob_store::InMemoryBlobStore;
+
+    use super::AppState;
+    use crate::registry::InMemoryRegistryMeta;
+
+    fn state() -> Arc<AppState> {
+        AppState::new(
+            Arc::new(InMemoryBlobStore::new()),
+            Arc::new(InMemoryRegistryMeta::new()),
+        )
+    }
+
+    #[test]
+    fn blob_count_reflects_increments_and_saturating_decrements() {
+        // `blob_count()` must return the live count, not a constant.
+        // Kills `-> 0`, `-> 1`, and `-> -1` return-constant mutants by
+        // asserting three distinct non-constant values (0, 2, 1).
+        let st = state();
+        assert_eq!(st.blob_count(), 0, "fresh state starts at 0");
+
+        st.inc_blob_count();
+        st.inc_blob_count();
+        assert_eq!(st.blob_count(), 2, "two increments give 2");
+
+        st.dec_blob_count();
+        assert_eq!(st.blob_count(), 1, "one decrement gives 1");
+    }
+
+    #[test]
+    fn blob_count_saturates_at_zero_never_negative() {
+        // A decrement below zero saturates (never -1). This also rules
+        // out the `-> -1` constant mutant from a different angle.
+        let st = state();
+        st.dec_blob_count();
+        assert_eq!(st.blob_count(), 0, "decrement on empty stays at 0");
+    }
+}
+
 /// Build the Axum router for every `/v2/**` OCI endpoint.
 ///
 /// This router covers only the OCI Distribution Spec surface. To add

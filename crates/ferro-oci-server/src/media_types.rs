@@ -113,4 +113,24 @@ mod tests {
             Some(ManifestKind::ImageManifest),
         );
     }
+
+    #[test]
+    fn vnd_prefix_without_json_suffix_is_not_artifact() {
+        // The artifact arm requires BOTH `starts_with("application/vnd.")`
+        // AND `ends_with("+json")`. Mutating `&&` to `||` would classify a
+        // `vnd.` media type that does NOT end in `+json` as Artifact. A
+        // `vnd.` tarball media type must classify as None (rejected).
+        assert_eq!(
+            classify_manifest_media_type("application/vnd.docker.image.rootfs.diff.tar.gzip"),
+            None,
+            "a vnd.* tar media type is not a manifest"
+        );
+        // Symmetrically, a `+json` type NOT under `application/vnd.` is
+        // also None (so the artifact arm needs the vnd. prefix too).
+        assert_eq!(
+            classify_manifest_media_type("application/custom+json"),
+            None,
+            "a non-vnd +json type is not a manifest artifact"
+        );
+    }
 }

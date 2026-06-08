@@ -373,6 +373,44 @@ mod tests {
     }
 
     #[test]
+    fn handler_for_probe_routes_are_labelled() {
+        // `/live` and `/ready` have dedicated arms that the path-tail
+        // fallback would NOT recover (neither path matches a suffix
+        // keyword), so deleting either arm degrades the label to "other".
+        // Assert the exact labels to kill those match-arm deletions.
+        assert_eq!(Metrics::handler_for(Some("/live"), "/live"), "live");
+        assert_eq!(Metrics::handler_for(Some("/ready"), "/ready"), "ready");
+    }
+
+    #[test]
+    fn method_label_maps_every_known_method() {
+        use axum::http::Method;
+        // Each arm has a distinct label; deleting any arm collapses it to
+        // the `_ => "OTHER"` default, which these exact assertions catch.
+        assert_eq!(method_label(&Method::GET), "GET");
+        assert_eq!(method_label(&Method::HEAD), "HEAD");
+        assert_eq!(method_label(&Method::POST), "POST");
+        assert_eq!(method_label(&Method::PUT), "PUT");
+        assert_eq!(method_label(&Method::PATCH), "PATCH");
+        assert_eq!(method_label(&Method::DELETE), "DELETE");
+        assert_eq!(method_label(&Method::OPTIONS), "OPTIONS");
+        // An uncommon method falls through to the bounded default.
+        assert_eq!(method_label(&Method::TRACE), "OTHER");
+    }
+
+    #[test]
+    fn metrics_debug_impl_names_the_struct() {
+        // The hand-written Debug impl must write "Metrics" to the
+        // formatter; mutating its body to `Ok(())` would emit nothing.
+        let m = Metrics::new();
+        let rendered = format!("{m:?}");
+        assert!(
+            rendered.contains("Metrics"),
+            "Debug output must name the struct, got: {rendered:?}"
+        );
+    }
+
+    #[test]
     fn encode_emits_prometheus_text_format() {
         let m = Metrics::new();
         m.requests_total

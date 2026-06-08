@@ -979,6 +979,204 @@ mod tests {
         );
     }
 
+    #[test]
+    fn default_session_ttl_is_one_hour() {
+        // `DEFAULT_UPLOAD_SESSION_TTL = Duration::from_secs(60 * 60)`.
+        // Kills `* -> +` (would be 120s) and `* -> /` (would be 1s).
+        assert_eq!(
+            super::DEFAULT_UPLOAD_SESSION_TTL,
+            Duration::from_secs(3600),
+            "default idle TTL must be exactly one hour (3600s)"
+        );
+    }
+
+    #[test]
+    fn load_snapshot_missing_file_is_ok_none() {
+        // The `Err(e) if e.kind() == NotFound => Ok(None)` arm: a missing
+        // file must yield Ok(None) (start empty), not Err. Kills the
+        // guard-always-false and `== -> !=` mutants for the missing case.
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let missing = tmp.path().join("does-not-exist.json");
+        let Ok(loaded) = super::InMemoryRegistryMeta::load_snapshot(&missing) else {
+            panic!("missing file must be Ok(None), not Err");
+        };
+        assert!(loaded.is_none(), "missing snapshot ⇒ Ok(None)");
+    }
+
+    #[test]
+    fn load_snapshot_non_notfound_io_error_is_err() {
+        // Pointing at a directory makes `std::fs::read` fail with a kind
+        // that is NOT NotFound. The NotFound guard must NOT swallow it —
+        // it must propagate as Err. Kills the guard-always-true mutant
+        // (which would turn every IO error into Ok(None)) and the
+        // `== -> !=` mutant (which would route a non-NotFound error into
+        // the Ok(None) arm).
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        // `tmp.path()` itself is a directory; reading it as a file errors
+        // with IsADirectory / other non-NotFound kind.
+        let result = super::InMemoryRegistryMeta::load_snapshot(tmp.path());
+        let Err(err) = result else {
+            panic!("reading a directory as a snapshot file must be Err");
+        };
+        assert_ne!(
+            err.kind(),
+            std::io::ErrorKind::NotFound,
+            "the error is a real IO failure, not NotFound"
+        );
+    }
+
+    #[test]
+    fn sweep_idle_uploads_returns_count_swept() {
+        // `before - self.uploads.len()` returns the number evicted.
+        // Kills `- -> +` (which would return before + after). Insert two
+        // sessions, sweep with ttl=0 (both immediately idle), expect 2.
+        use super::InMemoryState;
+        use std::time::Instant;
+        let mut s = InMemoryState::default();
+        s.uploads.insert(
+            ("repo".to_owned(), "u1".to_owned()),
+            UploadState::new("repo", "u1"),
+        );
+        s.uploads.insert(
+            ("repo".to_owned(), "u2".to_owned()),
+            UploadState::new("repo", "u2"),
+        );
+        let swept = s.sweep_idle_uploads(Instant::now(), Duration::from_secs(0));
+        assert_eq!(swept, 2, "both idle sessions swept ⇒ count is 2, not 4");
+        assert!(s.uploads.is_empty(), "swept sessions removed");
+    }
+
+    #[tokio::test]
+    async fn delete_by_digest_drops_only_tags_pointing_at_it() {
+        // `tag_map.retain(|_, v| v != &digest_str)` keeps tags that do
+        // NOT point at the deleted digest. Mutating `!=` to `==` would
+        // instead keep ONLY the tags pointing at the deleted digest
+        // (dropping unrelated tags). Push two manifests under two tags,
+        // delete one by digest, and assert the unrelated tag survives
+        // while the deleted one is gone.
+        let reg = InMemoryRegistryMeta::new();
+        let body_a = Bytes::from_static(b"manifest-a");
+        let body_b = Bytes::from_static(b"manifest-b");
+        let digest_a = Digest::sha256_of(&body_a);
+        let digest_b = Digest::sha256_of(&body_b);
+        reg.put_manifest(
+            "repo",
+            &Reference::Tag("a".to_owned()),
+            &digest_a,
+            "application/vnd.oci.image.manifest.v1+json",
+            body_a,
+        )
+        .await
+        .expect("put a");
+        reg.put_manifest(
+            "repo",
+            &Reference::Tag("b".to_owned()),
+            &digest_b,
+            "application/vnd.oci.image.manifest.v1+json",
+            body_b,
+        )
+        .await
+        .expect("put b");
+
+        // Delete manifest A by digest.
+        let removed = reg
+            .delete_manifest("repo", &Reference::Digest(digest_a.clone()))
+            .await
+            .expect("delete a");
+        assert!(removed, "manifest A deleted");
+
+        // Tag "a" must no longer resolve; tag "b" MUST still resolve.
+        assert!(
+            reg.get_manifest("repo", &Reference::Tag("a".to_owned()))
+                .await
+                .expect("get a")
+                .is_none(),
+            "tag pointing at the deleted digest is gone"
+        );
+        let still_b = reg
+            .get_manifest("repo", &Reference::Tag("b".to_owned()))
+            .await
+            .expect("get b")
+            .expect("tag b survives unrelated delete");
+        assert_eq!(still_b.0, digest_b, "unrelated tag still resolves to B");
+    }
+
+    #[tokio::test]
+    async fn list_tags_last_cursor_is_strictly_after() {
+        // `names.retain(|t| t.as_str() > cursor)` keeps tags strictly
+        // after `last`. Boundary: tags [a, b, c], last="b" ⇒ [c]. This
+        // distinguishes `>` (→[c]) from `==` (→[]), `<` (→[a]), and
+        // `>=` (→[b, c]).
+        let reg = InMemoryRegistryMeta::new();
+        for t in ["a", "b", "c"] {
+            let body = Bytes::from(format!("m-{t}"));
+            let digest = Digest::sha256_of(&body);
+            reg.put_manifest(
+                "repo",
+                &Reference::Tag(t.to_owned()),
+                &digest,
+                "application/vnd.oci.image.manifest.v1+json",
+                body,
+            )
+            .await
+            .expect("put");
+        }
+        let page = reg.list_tags("repo", Some("b"), None).await.expect("tags");
+        assert_eq!(page, vec!["c".to_owned()], "last=b yields strictly-after");
+    }
+
+    #[tokio::test]
+    async fn list_repositories_last_cursor_is_strictly_after() {
+        // Same boundary trio as list_tags, for the catalog endpoint.
+        let reg = InMemoryRegistryMeta::new();
+        for name in ["repo-a", "repo-b", "repo-c"] {
+            let body = Bytes::from(format!("m-{name}"));
+            let digest = Digest::sha256_of(&body);
+            reg.put_manifest(
+                name,
+                &Reference::Digest(digest.clone()),
+                &digest,
+                "application/vnd.oci.image.manifest.v1+json",
+                body,
+            )
+            .await
+            .expect("put");
+        }
+        let page = reg
+            .list_repositories(Some("repo-b"), None)
+            .await
+            .expect("repos");
+        assert_eq!(
+            page,
+            vec!["repo-c".to_owned()],
+            "last=repo-b yields strictly-after"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_upload_removes_the_session() {
+        // `complete_upload` removes the session from the uploads map.
+        // Mutating the body to `Ok(())` would leave it in place. Assert
+        // the session no longer resolves afterward.
+        let reg = InMemoryRegistryMeta::new();
+        let uuid = started(reg.start_upload("repo").await.expect("start"));
+        reg.append_upload("repo", &uuid, 0, Bytes::from_static(b"x"))
+            .await
+            .expect("append");
+        let digest = Digest::sha256_of(b"x");
+        reg.complete_upload("repo", &uuid, &digest)
+            .await
+            .expect("complete");
+        let after = reg
+            .get_upload_state("repo", &uuid)
+            .await
+            .expect("get state");
+        assert!(
+            after.is_none(),
+            "a completed upload session must be removed from the store"
+        );
+    }
+
     #[tokio::test]
     async fn expired_session_is_evicted_on_access() {
         // R2-7: a session idle past its TTL is evicted on access so the

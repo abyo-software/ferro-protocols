@@ -265,4 +265,19 @@ mod tests {
         let r = ContentRange::parse("0-1023").expect("parse");
         assert_eq!(r.checked_length(), Some(1024));
     }
+
+    #[test]
+    fn equal_start_end_is_a_valid_single_byte_range() {
+        // Boundary for `if start > end`: `5-5` is the inclusive single
+        // byte at offset 5 and MUST parse (length 1). Mutating `>` to
+        // `>=` would reject this equal-bounds range. The reversed `6-5`
+        // must still be rejected (so the comparison is not removed).
+        let r = ContentRange::parse("5-5").expect("equal bounds is one byte");
+        assert_eq!(r, ContentRange { start: 5, end: 5 });
+        assert_eq!(r.length(), 1, "inclusive length of N-N is 1");
+        assert!(
+            ContentRange::parse("6-5").is_err(),
+            "a genuinely reversed range stays rejected"
+        );
+    }
 }

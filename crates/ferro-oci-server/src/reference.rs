@@ -289,4 +289,102 @@ mod tests {
         // Unknown "algo" prefix before the colon.
         assert!("some:weird".parse::<Reference>().is_err());
     }
+
+    // ---- mutation-kill coverage ----------------------------------------
+
+    #[test]
+    fn name_at_exact_max_length_is_valid_over_is_rejected() {
+        // Boundary trio for `name.len() > MAX_NAME_LENGTH` (kills
+        // `> -> >=`): 255 is accepted, 256 is rejected.
+        let at = "a".repeat(super::MAX_NAME_LENGTH);
+        assert_eq!(at.len(), 255);
+        assert!(validate_name(&at).is_ok(), "exactly 255 chars must be valid");
+        let over = "a".repeat(super::MAX_NAME_LENGTH + 1);
+        assert!(validate_name(&over).is_err(), "256 chars must be rejected");
+    }
+
+    #[test]
+    fn internal_invalid_separator_is_rejected() {
+        // `foo!bar` has a `!` separator run between two alnum runs. The
+        // component-walk loop (`while i < bytes.len()`) must execute its
+        // body and reject the run via `is_valid_separator`. Kills the
+        // loop-guard mutants (`< -> ==`, `< -> >`, inner `< -> <=`), the
+        // `is_valid_separator -> true` constant mutant, and exercises the
+        // separator-scan inner loop.
+        let err = validate_name("foo!bar").expect_err("`!` separator invalid");
+        assert_eq!(err.code.as_str(), "NAME_INVALID");
+        // A component that is purely alnum stays valid (so the rejection
+        // above is specific to the bad separator, not a blanket fail).
+        assert!(validate_name("foobar").is_ok());
+    }
+
+    #[test]
+    fn mixed_dash_dot_separator_run_is_rejected() {
+        // Separator run `-.` is neither `.`/`_`/`__` nor all-dashes.
+        // `is_valid_separator` returns `!s.is_empty() && all(== '-')`;
+        // mutating `&&` to `||` would accept it. Assert it is rejected.
+        assert!(
+            validate_name("foo-.bar").is_err(),
+            "mixed `-.` separator must be rejected"
+        );
+        // A pure dash run of the same length stays valid (isolates the
+        // failure to the `.` mixed in, not the run length).
+        assert!(validate_name("foo--bar").is_ok());
+    }
+
+    #[test]
+    fn tag_at_exact_max_length_boundary() {
+        // `tag.len() > MAX_TAG_LENGTH`: 128 valid, 129 invalid. Kills
+        // `> -> ==` (would reject 128) and `> -> >=` (would reject 128).
+        let at: Reference = "t".repeat(super::MAX_TAG_LENGTH).parse().expect("128-char tag");
+        assert_eq!(at.as_tag().map(str::len), Some(128));
+        let over = "t".repeat(super::MAX_TAG_LENGTH + 1);
+        assert!(
+            over.parse::<Reference>().is_err(),
+            "129-char tag must be rejected"
+        );
+    }
+
+    #[test]
+    fn empty_tag_is_rejected() {
+        // `tag.is_empty() || tag.len() > MAX` — mutating `||` to `&&`
+        // would stop short-circuiting on the empty case and then index
+        // `bytes[0]` on an empty slice. The empty reference must reject.
+        assert!("".parse::<Reference>().is_err(), "empty tag rejected");
+    }
+
+    #[test]
+    fn tag_starting_with_underscore_is_valid() {
+        // First char `_` is allowed (`bytes[0] == b'_'`). Mutating `==`
+        // to `!=` would reject `_tag`. Assert it parses as a tag.
+        let r: Reference = "_internal".parse().expect("underscore-leading tag");
+        assert_eq!(r.as_tag(), Some("_internal"));
+    }
+
+    #[test]
+    fn tag_starting_with_dot_is_rejected() {
+        // `is_valid_tag` must reject a leading `.` (not alnum, not `_`).
+        // Kills `is_valid_tag -> true`.
+        assert!(".bad".parse::<Reference>().is_err(), "leading `.` tag rejected");
+    }
+
+    #[test]
+    fn is_digest_and_as_digest_distinguish_variants() {
+        let tag: Reference = "latest".parse().expect("tag");
+        assert!(!tag.is_digest(), "a tag is not a digest");
+        assert!(tag.as_digest().is_none(), "a tag has no digest");
+
+        let digest_str = format!("sha256:{}", "a".repeat(64));
+        let dig: Reference = digest_str.parse().expect("digest");
+        assert!(dig.is_digest(), "a digest reference is a digest");
+        assert!(
+            dig.as_digest().is_some(),
+            "as_digest must return Some for a Digest variant"
+        );
+        assert_eq!(
+            dig.as_digest().expect("some").to_string(),
+            digest_str,
+            "as_digest round-trips the exact digest"
+        );
+    }
 }
