@@ -238,6 +238,150 @@ mod tests {
         assert_eq!(listed, digests);
     }
 
+    // --- mutation-kill tests ---
+
+    // Kills `tmp_dir -> Default::default()`: the temp dir must live under
+    // the store root and be the dotted `.tmp` shard, not an empty path.
+    #[test]
+    fn tmp_dir_is_under_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FsBlobStore::new(dir.path()).unwrap();
+        let tmp = store.tmp_dir(DigestAlgo::Sha256);
+        assert_ne!(tmp, PathBuf::default());
+        assert!(tmp.starts_with(dir.path()), "tmp dir must be under root");
+        assert_eq!(tmp.file_name().and_then(|n| n.to_str()), Some(".tmp"));
+        assert_eq!(tmp, dir.path().join("sha256").join(".tmp"));
+    }
+
+    // Kills `contains -> Ok(true)`, the `NotFound -> false` match-guard
+    // mutant, and `== -> !=` for the NotFound arm: an absent blob must
+    // report `Ok(false)`, never `Ok(true)` and never `Err`.
+    #[tokio::test]
+    async fn fs_contains_absent_is_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FsBlobStore::new(dir.path()).unwrap();
+        let d = Digest::sha256_of(b"definitely-absent");
+        assert!(!store.contains(&d).await.unwrap());
+        // Present blob reports true (distinguishes from a const `false`).
+        let body = Bytes::from_static(b"present");
+        let present = Digest::sha256_of(&body);
+        store.put(&present, body).await.unwrap();
+        assert!(store.contains(&present).await.unwrap());
+    }
+
+    // Kills the `get` NotFound match-guard `-> true` mutant: a read error
+    // that is NOT `NotFound` must propagate as an Io error, not be
+    // swallowed into `NotFound`. We trigger a non-NotFound error by
+    // placing a directory where the blob file would be (reading a dir
+    // yields an error whose kind is not NotFound).
+    #[tokio::test]
+    async fn fs_get_non_not_found_error_propagates() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FsBlobStore::new(dir.path()).unwrap();
+        let d = Digest::sha256_of(b"dir-in-the-way");
+        let blob_path = store.path_for(&d);
+        std::fs::create_dir_all(&blob_path).unwrap();
+        let err = store.get(&d).await.unwrap_err();
+        assert!(
+            !matches!(err, BlobStoreError::NotFound(_)),
+            "non-NotFound read error must not be reported as NotFound, got {err:?}"
+        );
+        assert!(
+            matches!(err, BlobStoreError::Io(_)),
+            "expected an Io error variant, got {err:?}"
+        );
+    }
+
+    // Kills the `contains` NotFound match-guard `-> true` mutant: a
+    // metadata error that is NOT NotFound must propagate as Err. We make
+    // the parent path component a regular file so traversing into it
+    // yields a non-NotFound error (NotADirectory), distinct from absent.
+    #[tokio::test]
+    async fn fs_contains_non_not_found_error_propagates() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FsBlobStore::new(dir.path()).unwrap();
+        let d = Digest::sha256_of(b"file-parent");
+        let blob_path = store.path_for(&d);
+        let parent = blob_path.parent().unwrap();
+        std::fs::create_dir_all(parent.parent().unwrap()).unwrap();
+        // Create a *file* where the 2-char prefix directory should be, so
+        // descending into it gives a NotADirectory-style error.
+        std::fs::write(parent, b"not a dir").unwrap();
+        let err = store.contains(&d).await.unwrap_err();
+        assert!(
+            matches!(err, BlobStoreError::Io(_)),
+            "non-NotFound metadata error must propagate as Io, got {err:?}"
+        );
+    }
+
+    // Kills `delete -> Ok(())` (body) and the `delete` NotFound
+    // match-guard `-> true` mutant.
+    //
+    // Body part: delete must actually remove a present blob.
+    // Guard part: a non-NotFound removal error (e.g. removing a path that
+    // is a directory) must propagate as Err, not be swallowed as Ok.
+    #[tokio::test]
+    async fn fs_delete_removes_and_propagates_real_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FsBlobStore::new(dir.path()).unwrap();
+
+        // Body: real removal.
+        let body = Bytes::from_static(b"delete-me");
+        let d = Digest::sha256_of(&body);
+        store.put(&d, body).await.unwrap();
+        assert!(store.contains(&d).await.unwrap());
+        store.delete(&d).await.unwrap();
+        assert!(!store.contains(&d).await.unwrap());
+        assert!(store.get(&d).await.is_err());
+
+        // Guard: removing a directory (not a file) is a non-NotFound error.
+        let d2 = Digest::sha256_of(b"a-directory-blob");
+        let blob_path = store.path_for(&d2);
+        std::fs::create_dir_all(&blob_path).unwrap();
+        let err = store.delete(&d2).await.unwrap_err();
+        assert!(
+            matches!(err, BlobStoreError::Io(_)),
+            "removing a directory must surface a non-NotFound Io error, got {err:?}"
+        );
+    }
+
+    // Kills `collect_algo` `|| -> &&` on the prefix-skip guard
+    // (`name.starts_with('.') || name.len() != 2`). We plant a stray
+    // 3-char hex directory whose contents, if (wrongly) descended into,
+    // would form a valid 64-hex digest. The original code skips it
+    // (len != 2 alone triggers the OR), so it must NOT appear in `list`.
+    // Under `&&` the dir would be descended and the bogus digest listed.
+    #[tokio::test]
+    async fn fs_list_skips_non_two_char_prefix_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FsBlobStore::new(dir.path()).unwrap();
+
+        // A genuine entry so list has a real baseline.
+        let body = Bytes::from_static(b"genuine");
+        let real = Digest::sha256_of(&body);
+        store.put(&real, body).await.unwrap();
+
+        // Stray 3-char prefix dir under sha256/ with a 61-char hex file
+        // inside => 3 + 61 = 64 hex chars total => a structurally valid
+        // sha256 digest IF the prefix were honoured.
+        let stray_prefix = "aaa"; // len 3, all hex, does not start with '.'
+        let stray_rest = "b".repeat(61);
+        let stray_dir = dir.path().join("sha256").join(stray_prefix);
+        std::fs::create_dir_all(&stray_dir).unwrap();
+        std::fs::write(stray_dir.join(&stray_rest), b"x").unwrap();
+        let bogus_hex = format!("{stray_prefix}{stray_rest}");
+
+        let listed = store.list().await.unwrap();
+        assert!(
+            listed.iter().any(|d| d == &real),
+            "genuine digest must be listed"
+        );
+        assert!(
+            listed.iter().all(|d| d.hex() != bogus_hex),
+            "a non-2-char prefix dir must be skipped, but bogus digest was listed"
+        );
+    }
+
     #[tokio::test]
     async fn fs_concurrent_put_same_digest_no_corruption() {
         let dir = tempfile::tempdir().unwrap();

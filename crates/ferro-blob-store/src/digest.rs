@@ -253,4 +253,43 @@ mod tests {
         let d: Digest = upper.parse().unwrap();
         assert!(d.hex().chars().all(|c| !c.is_ascii_uppercase()));
     }
+
+    // Kills `<TryFrom<String>>::try_from -> Ok(Default::default())`: the
+    // value parsed from a String must round-trip to the SAME wire form and
+    // carry the SAME algorithm/hex, not a default placeholder.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn try_from_string_round_trips_exact() {
+        let wire = format!("sha256:{}", "a".repeat(64));
+        let d: Digest = Digest::try_from(wire.clone()).unwrap();
+        assert_eq!(d.algo(), DigestAlgo::Sha256);
+        assert_eq!(d.hex(), "a".repeat(64));
+        assert_eq!(d.to_string(), wire);
+
+        // A sha512 input must yield a sha512 digest (not a constant).
+        let wire512 = format!("sha512:{}", "b".repeat(128));
+        let d512: Digest = Digest::try_from(wire512.clone()).unwrap();
+        assert_eq!(d512.algo(), DigestAlgo::Sha512);
+        assert_eq!(d512.to_string(), wire512);
+
+        // Malformed input must still be rejected (a stub that returns
+        // Ok(default) would wrongly accept it).
+        assert!(Digest::try_from("not-a-digest".to_string()).is_err());
+    }
+
+    // Kills `<From<Digest>>::from -> Default::default()`: converting a
+    // Digest into its String form must produce the exact `<algo>:<hex>`
+    // wire string, not an empty default String.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn into_string_is_exact_wire_form() {
+        let d = Digest::sha256_of(b"payload");
+        let expected = format!("sha256:{}", d.hex());
+        let s: String = String::from(d.clone());
+        assert_eq!(s, expected);
+        assert!(!s.is_empty());
+        // And it must round-trip back to the same digest.
+        let back: Digest = s.parse().unwrap();
+        assert_eq!(back, d);
+    }
 }

@@ -154,4 +154,55 @@ mod tests {
         b.clear();
         assert!(a.is_empty());
     }
+
+    // --- mutation-kill tests ---
+
+    // Kills `len -> 1`: empty store must report 0, and the count must grow
+    // by exactly one per distinct put (a constant `1` mutant can satisfy
+    // neither the 0 case nor the 3 case).
+    #[tokio::test]
+    async fn len_counts_distinct_puts() {
+        let store = InMemoryBlobStore::new();
+        assert_eq!(store.len(), 0);
+        let bodies: &[&[u8]] = &[b"one", b"two", b"three"];
+        for (i, body) in bodies.iter().enumerate() {
+            let d = Digest::sha256_of(body);
+            store.put(&d, Bytes::copy_from_slice(body)).await.unwrap();
+            assert_eq!(store.len(), i + 1);
+        }
+        assert_eq!(store.len(), 3);
+    }
+
+    // Kills `is_empty -> true`: after a put the store is non-empty, and a
+    // fresh store is empty. A constant `true` mutant fails the post-put
+    // assertion.
+    #[tokio::test]
+    async fn is_empty_tracks_contents() {
+        let store = InMemoryBlobStore::new();
+        assert!(store.is_empty());
+        let body = Bytes::from_static(b"data");
+        let d = Digest::sha256_of(&body);
+        store.put(&d, body).await.unwrap();
+        assert!(!store.is_empty());
+        assert_eq!(store.len(), 1);
+        store.clear();
+        assert!(store.is_empty());
+    }
+
+    // Kills `delete -> Ok(())`: delete must actually remove the entry. A
+    // stub that returns Ok without removing leaves the blob present.
+    #[tokio::test]
+    async fn delete_actually_removes() {
+        let store = InMemoryBlobStore::new();
+        let body = Bytes::from_static(b"to-delete");
+        let d = Digest::sha256_of(&body);
+        store.put(&d, body).await.unwrap();
+        assert!(store.contains(&d).await.unwrap());
+        assert_eq!(store.len(), 1);
+        store.delete(&d).await.unwrap();
+        assert!(!store.contains(&d).await.unwrap());
+        assert!(store.get(&d).await.is_err());
+        assert_eq!(store.len(), 0);
+        assert!(store.is_empty());
+    }
 }
