@@ -274,4 +274,91 @@ mod tests {
             .with_status(StatusCode::METHOD_NOT_ALLOWED);
         assert_eq!(err.status(), StatusCode::METHOD_NOT_ALLOWED);
     }
+
+    #[test]
+    fn every_code_has_wire_string_and_status() {
+        use OciErrorCode::{
+            BlobUnknown, BlobUploadInvalid, BlobUploadUnknown, Denied, DigestInvalid,
+            ManifestBlobUnknown, ManifestInvalid, ManifestUnknown, NameInvalid, NameUnknown,
+            SizeInvalid, TooManyRequests, Unauthorized, Unsupported,
+        };
+        // (variant, wire string, expected HTTP status) — covers every
+        // arm of `as_str` and `status` per OCI Distribution Spec §3.1.
+        let cases = [
+            (BlobUnknown, "BLOB_UNKNOWN", StatusCode::NOT_FOUND),
+            (
+                BlobUploadInvalid,
+                "BLOB_UPLOAD_INVALID",
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                BlobUploadUnknown,
+                "BLOB_UPLOAD_UNKNOWN",
+                StatusCode::NOT_FOUND,
+            ),
+            (DigestInvalid, "DIGEST_INVALID", StatusCode::BAD_REQUEST),
+            (
+                ManifestBlobUnknown,
+                "MANIFEST_BLOB_UNKNOWN",
+                StatusCode::NOT_FOUND,
+            ),
+            (ManifestInvalid, "MANIFEST_INVALID", StatusCode::BAD_REQUEST),
+            (ManifestUnknown, "MANIFEST_UNKNOWN", StatusCode::NOT_FOUND),
+            (NameInvalid, "NAME_INVALID", StatusCode::BAD_REQUEST),
+            (NameUnknown, "NAME_UNKNOWN", StatusCode::NOT_FOUND),
+            (SizeInvalid, "SIZE_INVALID", StatusCode::BAD_REQUEST),
+            (Unauthorized, "UNAUTHORIZED", StatusCode::UNAUTHORIZED),
+            (Denied, "DENIED", StatusCode::FORBIDDEN),
+            (
+                Unsupported,
+                "UNSUPPORTED",
+                StatusCode::METHOD_NOT_ALLOWED,
+            ),
+            (
+                TooManyRequests,
+                "TOOMANYREQUESTS",
+                StatusCode::TOO_MANY_REQUESTS,
+            ),
+        ];
+        for (code, wire, status) in cases {
+            assert_eq!(code.as_str(), wire, "{code:?} wire string");
+            assert_eq!(code.status(), status, "{code:?} status");
+            // `Display` delegates to `as_str`.
+            assert_eq!(code.to_string(), wire, "{code:?} display");
+        }
+    }
+
+    #[test]
+    fn with_detail_is_surfaced_in_body() {
+        let err = OciError::new(OciErrorCode::ManifestInvalid, "bad")
+            .with_detail(serde_json::json!({ "field": "config" }));
+        let body = err.body();
+        assert_eq!(
+            body.errors[0].detail.as_ref().expect("detail")["field"],
+            "config"
+        );
+    }
+
+    #[test]
+    fn blob_store_error_maps_to_oci_codes() {
+        use ferro_blob_store::BlobStoreError;
+
+        let not_found: OciError = BlobStoreError::NotFound("x".into()).into();
+        assert_eq!(not_found.code, OciErrorCode::BlobUnknown);
+
+        // `InvalidDigest` wraps a real parse failure.
+        let parse_err = "no-colon".parse::<ferro_blob_store::Digest>().unwrap_err();
+        let bad_digest: OciError = BlobStoreError::InvalidDigest(parse_err).into();
+        assert_eq!(bad_digest.code, OciErrorCode::DigestInvalid);
+
+        let mismatch: OciError = BlobStoreError::DigestMismatch {
+            expected: "a".into(),
+            computed: "b".into(),
+        }
+        .into();
+        assert_eq!(mismatch.code, OciErrorCode::DigestInvalid);
+
+        let io: OciError = BlobStoreError::Io(std::io::Error::other("disk gone")).into();
+        assert_eq!(io.code, OciErrorCode::Unsupported);
+    }
 }
