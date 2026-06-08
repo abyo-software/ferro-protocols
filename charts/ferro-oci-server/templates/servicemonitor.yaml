@@ -1,8 +1,8 @@
 {{/* SPDX-License-Identifier: Apache-2.0 */}}
 {{/*
-ferro-oci-server does not yet expose a Prometheus /metrics endpoint
-(roadmap). This ServiceMonitor is DISABLED by default — enabling it before
-the server ships /metrics produces scrape errors. See values.yaml.
+ferro-oci-server exposes a Prometheus /metrics endpoint on the `http` port.
+This ServiceMonitor is ENABLED by default (serviceMonitor.enabled in
+values.yaml) and scrapes that port at `path: /metrics`.
 */}}
 {{- if .Values.serviceMonitor.enabled -}}
 apiVersion: monitoring.coreos.com/v1

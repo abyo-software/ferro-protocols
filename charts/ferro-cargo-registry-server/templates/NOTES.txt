@@ -33,6 +33,7 @@ Hit the registry (port-forward from your shell):
   curl -s http://localhost:8081/ready         # readiness (200 OK)
   curl -s http://localhost:8081/healthz       # {"status":"ok"}
   curl -s http://localhost:8081/config.json   # cargo sparse-index config
+  curl -s http://localhost:8081/metrics       # Prometheus metrics
 
 Point cargo at it (~/.cargo/config.toml):
 
@@ -40,8 +41,8 @@ Point cargo at it (~/.cargo/config.toml):
   index = "sparse+http://localhost:8081/index/"
 {{- if .Values.serviceMonitor.enabled }}
 
-ServiceMonitor is ENABLED. NOTE: ferro-cargo-registry-server does not yet
-expose a Prometheus /metrics endpoint (roadmap) — until it does, this will
-produce scrape errors. Disable it (`serviceMonitor.enabled=false`) if the
-server build you deployed has no /metrics.
+ServiceMonitor is ENABLED — Prometheus scrapes the `http` port at /metrics
+(request counters + latency histograms + crate-name / crate-version count
+gauges). Import the Grafana dashboard from
+dashboards/grafana/ferro-cargo-registry-server.json.
 {{- end }}

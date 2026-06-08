@@ -26,6 +26,7 @@ Hit the registry (port-forward from your shell):
   curl -s http://localhost:8080/ready     # readiness (200 OK)
   curl -s http://localhost:8080/healthz   # {"status":"ok"}
   curl -s http://localhost:8080/v2/       # OCI Distribution API root
+  curl -s http://localhost:8080/metrics   # Prometheus metrics
 
 Push an image (example):
 
@@ -33,8 +34,7 @@ Push an image (example):
   docker push localhost:8080/alpine:latest
 {{- if .Values.serviceMonitor.enabled }}
 
-ServiceMonitor is ENABLED. NOTE: ferro-oci-server does not yet expose a
-Prometheus /metrics endpoint (roadmap) — until it does, this will produce
-scrape errors. Disable it (`serviceMonitor.enabled=false`) if the server
-build you deployed has no /metrics.
+ServiceMonitor is ENABLED — Prometheus scrapes the `http` port at /metrics
+(request counters + latency histograms + storage-blob-count gauge). Import
+the Grafana dashboard from dashboards/grafana/ferro-oci-server.json.
 {{- end }}

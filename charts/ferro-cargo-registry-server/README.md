@@ -39,15 +39,19 @@ Liveness is wired to `/live` and readiness to `/ready` (both return
 `200 OK`). `/healthz` returns `{"status":"ok"}` and backs the image's
 Docker `HEALTHCHECK`.
 
-## Metrics / ServiceMonitor (roadmap)
+## Metrics / ServiceMonitor
 
-ferro-cargo-registry-server does **not** yet expose a Prometheus
-`/metrics` endpoint. The chart ships a `ServiceMonitor` template but it is
-**disabled by default** (`serviceMonitor.enabled=false`). Enable it only
-after the server build you run ships `/metrics`, otherwise
-prometheus-operator will log scrape errors. The bundled Grafana dashboard
-(`dashboards/grafana/ferro-cargo-registry-server.json`) is authored
-against the intended metric names for the same reason.
+ferro-cargo-registry-server exposes a Prometheus `/metrics` endpoint on
+the `http` port: per-route request counters
+(`ferrocargo_http_requests_total`), a request-latency histogram
+(`ferrocargo_http_request_duration_seconds`), an in-flight gauge, a
+build-info gauge, and index-size gauges (`ferrocargo_crates_total` =
+distinct crate names, `ferrocargo_crate_versions` = distinct published
+versions; `ferrocargo_storage_bytes` is registered but reads `0` until a
+size-reporting backend is wired). The chart's `ServiceMonitor` is
+**enabled by default** (`serviceMonitor.enabled=true`) and scrapes that
+port at `path: /metrics`. Import the bundled Grafana dashboard from
+`dashboards/grafana/ferro-cargo-registry-server.json`.
 
 ## Quality posture
 
@@ -70,4 +74,4 @@ against the intended metric names for the same reason.
 | `persistence.existingClaim` | `""` | reuse a pre-provisioned PVC |
 | `resources.limits.memory` | `512Mi` | size to concurrent-publish working set |
 | `service.port` | `8081` | listen + service port |
-| `serviceMonitor.enabled` | `false` | enable once `/metrics` exists |
+| `serviceMonitor.enabled` | `true` | scrape `/metrics` on the `http` port |

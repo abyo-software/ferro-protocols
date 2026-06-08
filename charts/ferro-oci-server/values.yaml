@@ -167,13 +167,12 @@ service:
 # -----------------------------------------------------------------------------
 # Prometheus ServiceMonitor (prometheus-operator)
 # -----------------------------------------------------------------------------
-# NOTE (roadmap): ferro-oci-server does not yet expose a Prometheus /metrics
-# endpoint. This ServiceMonitor is authored for when it does — it is DISABLED
-# by default and scrapes `path: /metrics` once enabled. Leaving it on today
-# would produce scrape errors. Flip `enabled: true` only after the server
-# ships /metrics.
+# ferro-oci-server exposes a Prometheus /metrics endpoint on the `http` port
+# (request counters + latency histograms + a storage-blob-count gauge). This
+# ServiceMonitor is ENABLED by default and scrapes `path: /metrics`. Set
+# `enabled: false` if you scrape via pod annotations or a separate Agent.
 serviceMonitor:
-  enabled: false
+  enabled: true
   namespace: ""
   path: /metrics
   interval: 30s
