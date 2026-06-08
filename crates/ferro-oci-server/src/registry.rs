@@ -758,8 +758,37 @@ impl RegistryMeta for InMemoryRegistryMeta {
                         keep
                     });
                 }
+                // R5-3: if the deleted manifest is itself a REFERRER (it was
+                // recorded as a descriptor under one or more subjects by
+                // `put_manifest_with_referrer`/`register_referrer`), removing
+                // only its blob/entry + tags would leave a DANGLING referrer
+                // descriptor in the index — `/referrers/<subject>` would still
+                // advertise a manifest that no longer exists. Prune, as part of
+                // this SAME delete transaction, every descriptor whose `digest`
+                // equals the deleted digest, scanning all subjects of this repo
+                // (a digest may appear under more than one subject). Each
+                // pruned (subject, index, descriptor) is remembered so the
+                // exact pre-delete index is restored on a persist-failure
+                // rollback (consistent with the R3-2 / R4-1 model).
+                let mut removed_referrers: Vec<(String, usize, ReferrerDescriptor)> = Vec::new();
+                if let Some(subject_map) = guard.referrers.get_mut(name) {
+                    for (subject_str, list) in subject_map.iter_mut() {
+                        // Walk back-to-front so the recorded indices stay valid
+                        // for re-insertion (and so we can `remove` in place).
+                        for idx in (0..list.len()).rev() {
+                            if list[idx].digest.to_string() == digest_str {
+                                let descriptor = list.remove(idx);
+                                removed_referrers.push((subject_str.clone(), idx, descriptor));
+                            }
+                        }
+                    }
+                    // Drop any subject lists emptied by the prune so an empty
+                    // subject does not linger in the index.
+                    subject_map.retain(|_, list| !list.is_empty());
+                }
                 if let Err(e) = self.persist_locked(&guard) {
-                    // Roll back: restore the manifest and its tags.
+                    // Roll back: restore the manifest, its tags, and any pruned
+                    // referrer descriptors to their exact prior positions.
                     guard
                         .manifests
                         .entry(name.to_owned())
@@ -769,6 +798,17 @@ impl RegistryMeta for InMemoryRegistryMeta {
                         let tag_map = guard.tags.entry(name.to_owned()).or_default();
                         for tag in removed_tags {
                             tag_map.insert(tag, digest_str.clone());
+                        }
+                    }
+                    if !removed_referrers.is_empty() {
+                        let subject_map = guard.referrers.entry(name.to_owned()).or_default();
+                        // We recorded prunes back-to-front per subject; replay
+                        // them front-to-back (reverse of the removal order) so
+                        // each recorded index is valid against the growing list.
+                        for (subject_str, idx, descriptor) in removed_referrers.into_iter().rev() {
+                            let list = subject_map.entry(subject_str).or_default();
+                            let at = idx.min(list.len());
+                            list.insert(at, descriptor);
                         }
                     }
                     drop(guard);
@@ -1737,6 +1777,229 @@ mod tests {
             .expect("get b")
             .expect("tag b survives unrelated delete");
         assert_eq!(still_b.0, digest_b, "unrelated tag still resolves to B");
+    }
+
+    #[tokio::test]
+    async fn r5_3_delete_referrer_manifest_prunes_its_descriptor() {
+        // R5-3: a manifest that is itself a REFERRER (registered as a
+        // descriptor under a subject) must, when deleted, have its descriptor
+        // pruned from the referrers index — otherwise `/referrers/<subject>`
+        // keeps advertising a now-absent manifest (a dangling referrer).
+        let reg = InMemoryRegistryMeta::new();
+        let subject = Digest::sha256_of(b"subject-image");
+
+        // Two referrer manifests under the SAME subject. M is the one we
+        // delete; the sibling N must remain listed afterward.
+        let m_body = Bytes::from_static(b"referrer-M");
+        let m_digest = Digest::sha256_of(&m_body);
+        let n_body = Bytes::from_static(b"referrer-N");
+        let n_digest = Digest::sha256_of(&n_body);
+
+        reg.put_manifest_with_referrer(
+            "lib/app",
+            &Reference::Digest(m_digest.clone()),
+            &m_digest,
+            "application/vnd.oci.image.manifest.v1+json",
+            m_body,
+            Some((
+                subject.clone(),
+                ReferrerDescriptor {
+                    media_type: "application/vnd.oci.image.manifest.v1+json".to_owned(),
+                    digest: m_digest.clone(),
+                    size: 9,
+                    artifact_type: Some("application/spdx+json".to_owned()),
+                    annotations: None,
+                },
+            )),
+        )
+        .await
+        .expect("put referrer M");
+        reg.put_manifest_with_referrer(
+            "lib/app",
+            &Reference::Digest(n_digest.clone()),
+            &n_digest,
+            "application/vnd.oci.image.manifest.v1+json",
+            n_body,
+            Some((
+                subject.clone(),
+                ReferrerDescriptor {
+                    media_type: "application/vnd.oci.image.manifest.v1+json".to_owned(),
+                    digest: n_digest.clone(),
+                    size: 9,
+                    artifact_type: Some("application/vnd.dev.cosign.sig".to_owned()),
+                    annotations: None,
+                },
+            )),
+        )
+        .await
+        .expect("put referrer N");
+
+        // Both M and N are advertised under the subject.
+        let before = reg
+            .list_referrers("lib/app", &subject, None)
+            .await
+            .expect("list before");
+        assert_eq!(before.len(), 2, "both referrers listed before delete");
+
+        // Delete M by digest.
+        let removed = reg
+            .delete_manifest("lib/app", &Reference::Digest(m_digest.clone()))
+            .await
+            .expect("delete M");
+        assert!(removed, "M deleted");
+
+        // M's descriptor is pruned; N's survives.
+        let after = reg
+            .list_referrers("lib/app", &subject, None)
+            .await
+            .expect("list after");
+        assert_eq!(after.len(), 1, "only the sibling referrer remains");
+        assert_eq!(
+            after[0].digest, n_digest,
+            "the surviving referrer is the sibling N, not the deleted M"
+        );
+        assert!(
+            !after.iter().any(|d| d.digest == m_digest),
+            "the deleted referrer manifest must no longer be advertised"
+        );
+    }
+
+    #[tokio::test]
+    async fn r5_3_delete_referrer_prunes_across_multiple_subjects() {
+        // R5-3 edge: a single manifest digest can be recorded as a descriptor
+        // under MULTIPLE subjects. Deleting it must prune the descriptor under
+        // EACH subject it appears in, leaving unrelated referrers intact.
+        let reg = InMemoryRegistryMeta::new();
+        let subject_a = Digest::sha256_of(b"subject-a");
+        let subject_b = Digest::sha256_of(b"subject-b");
+
+        let body = Bytes::from_static(b"shared-referrer");
+        let digest = Digest::sha256_of(&body);
+        let descriptor = || ReferrerDescriptor {
+            media_type: "application/vnd.oci.image.manifest.v1+json".to_owned(),
+            digest: digest.clone(),
+            size: 15,
+            artifact_type: None,
+            annotations: None,
+        };
+
+        // Publish the manifest once, then register it under two subjects.
+        reg.put_manifest_with_referrer(
+            "lib/app",
+            &Reference::Digest(digest.clone()),
+            &digest,
+            "application/vnd.oci.image.manifest.v1+json",
+            body,
+            Some((subject_a.clone(), descriptor())),
+        )
+        .await
+        .expect("put under subject A");
+        reg.register_referrer("lib/app", &subject_b, descriptor())
+            .await
+            .expect("register under subject B");
+        // An unrelated referrer under subject A that must survive.
+        let other_digest = Digest::sha256_of(b"other-referrer");
+        reg.register_referrer(
+            "lib/app",
+            &subject_a,
+            ReferrerDescriptor {
+                media_type: "application/vnd.oci.image.manifest.v1+json".to_owned(),
+                digest: other_digest.clone(),
+                size: 7,
+                artifact_type: None,
+                annotations: None,
+            },
+        )
+        .await
+        .expect("register other");
+
+        reg.delete_manifest("lib/app", &Reference::Digest(digest.clone()))
+            .await
+            .expect("delete shared");
+
+        let under_a = reg
+            .list_referrers("lib/app", &subject_a, None)
+            .await
+            .expect("list A");
+        assert_eq!(under_a.len(), 1, "only the unrelated referrer remains under A");
+        assert_eq!(under_a[0].digest, other_digest);
+        let under_b = reg
+            .list_referrers("lib/app", &subject_b, None)
+            .await
+            .expect("list B");
+        assert!(
+            under_b.is_empty(),
+            "the descriptor under subject B is pruned too"
+        );
+    }
+
+    #[tokio::test]
+    async fn r5_3_delete_referrer_persist_failure_does_not_prune() {
+        // R5-3 durability: if the delete's persist fails, the referrer
+        // descriptor must NOT be pruned — the whole delete rolls back, so
+        // `/referrers/<subject>` still lists it (consistent with R3-2 / R4-1).
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let reg = InMemoryRegistryMeta::with_persistence(tmp.path());
+        let subject = Digest::sha256_of(b"subject-image");
+        let body = Bytes::from_static(b"referrer-M");
+        let digest = Digest::sha256_of(&body);
+
+        // Publish M as a referrer under the subject (this persists OK).
+        reg.put_manifest_with_referrer(
+            "lib/app",
+            &Reference::Digest(digest.clone()),
+            &digest,
+            "application/vnd.oci.image.manifest.v1+json",
+            body,
+            Some((
+                subject.clone(),
+                ReferrerDescriptor {
+                    media_type: "application/vnd.oci.image.manifest.v1+json".to_owned(),
+                    digest: digest.clone(),
+                    size: 9,
+                    artifact_type: None,
+                    annotations: None,
+                },
+            )),
+        )
+        .await
+        .expect("put referrer M");
+
+        // Break persistence: replace metadata.json with a non-empty directory
+        // so the atomic rename in the delete's snapshot write fails.
+        let meta = tmp.path().join(super::METADATA_FILE_NAME);
+        std::fs::remove_file(&meta).expect("remove snapshot");
+        std::fs::create_dir(&meta).expect("metadata.json as dir");
+        std::fs::write(meta.join("child"), b"x").expect("child");
+
+        let err = reg
+            .delete_manifest("lib/app", &Reference::Digest(digest.clone()))
+            .await
+            .expect_err("delete must fail when persist fails");
+        assert!(
+            matches!(err, ferro_blob_store::BlobStoreError::Io(_)),
+            "persist failure maps to Io error, got {err:?}"
+        );
+
+        // The manifest is still served (delete rolled back) ...
+        assert!(
+            reg.get_manifest("lib/app", &Reference::Digest(digest.clone()))
+                .await
+                .expect("get M")
+                .is_some(),
+            "the manifest must survive a rolled-back delete"
+        );
+        // ... and crucially the referrer descriptor is NOT pruned.
+        let referrers = reg
+            .list_referrers("lib/app", &subject, None)
+            .await
+            .expect("list referrers");
+        assert_eq!(
+            referrers.len(),
+            1,
+            "the referrer descriptor must be restored on rollback"
+        );
+        assert_eq!(referrers[0].digest, digest);
     }
 
     #[tokio::test]
