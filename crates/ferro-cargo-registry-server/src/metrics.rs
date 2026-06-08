@@ -319,16 +319,17 @@ pub fn metrics_routes(state: MetricsState) -> Router {
 
 /// Wrap `app` so every request is instrumented and `/metrics` is served.
 ///
-/// The middleware records count/latency/in-flight on `app`'s routes; the
-/// merged `/metrics` route renders them. `cargo` is sampled on each scrape
-/// for the crate-count gauges.
+/// The `/metrics` route is merged into `app` *before* the tracking
+/// middleware is layered over the combined router, so a `/metrics` scrape
+/// is itself counted under the `metrics` handler label (matching the label
+/// emitted by [`Metrics::handler_for`]). Ordering matters: an axum `layer`
+/// only wraps routes already present on the router, so merging `/metrics`
+/// afterwards would leave scrapes uninstrumented. `cargo` is sampled on
+/// each scrape for the crate-count gauges.
 pub fn instrument(app: Router, metrics: Metrics, cargo: CargoState) -> Router {
     let state = MetricsState { metrics, cargo };
-    app.layer(axum::middleware::from_fn_with_state(
-        state.clone(),
-        track_metrics,
-    ))
-    .merge(metrics_routes(state))
+    app.merge(metrics_routes(state.clone()))
+        .layer(axum::middleware::from_fn_with_state(state, track_metrics))
 }
 
 #[cfg(test)]

@@ -112,6 +112,32 @@ async fn request_counter_increments_for_hit_route() {
     );
 }
 
+/// R2-3 regression: a `/metrics` scrape is itself instrumented. The
+/// module docs claim every HTTP request is recorded, so two `GET
+/// /metrics` calls must leave a `handler="metrics"` series in the
+/// counter (the first scrape is counted and visible to the second).
+#[tokio::test]
+async fn metrics_scrape_is_self_instrumented() {
+    let (app, _tmp) = setup();
+
+    // First scrape — counted by the middleware that now wraps /metrics.
+    let (status, _) = get_string(&app, "/metrics").await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Second scrape observes the first scrape's counter sample.
+    let (_, body) = get_string(&app, "/metrics").await;
+    let counted = body.lines().any(|line| {
+        line.starts_with("ferrocargo_http_requests_total")
+            && line.contains(r#"handler="metrics""#)
+            && line.contains(r#"method="GET""#)
+            && line.contains(r#"status="200""#)
+    });
+    assert!(
+        counted,
+        "expected a handler=\"metrics\" counter sample, got:\n{body}"
+    );
+}
+
 #[tokio::test]
 async fn crate_version_gauge_tracks_published_crate() {
     let (app, _tmp) = setup();
