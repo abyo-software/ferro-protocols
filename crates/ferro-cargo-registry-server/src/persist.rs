@@ -25,7 +25,9 @@
 //! with a logged warning — a damaged state file never prevents boot.
 
 use std::collections::BTreeMap;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use ferro_blob_store::{Digest, DigestAlgo};
 use serde::{Deserialize, Serialize};
@@ -147,17 +149,36 @@ pub fn load(data_dir: &Path) -> BTreeMap<String, CrateRecord> {
     out
 }
 
+/// Monotonic counter guaranteeing a distinct temp-file suffix per call
+/// within a process, combined with the pid so concurrent processes never
+/// collide on the temp name either.
+static SAVE_SEQ: AtomicU64 = AtomicU64::new(0);
+
 /// Write the in-memory index map through to the durable snapshot.
 ///
-/// The write is atomic: the snapshot is serialized to a sibling temp file
-/// and renamed over the target, so a crash mid-write never leaves a
-/// truncated `index-state.json`.
+/// The write is **atomic and crash-durable** (R3-5):
+///
+/// 1. The snapshot is serialized into a uniquely-named temp file created
+///    in the same directory with `O_CREAT | O_EXCL`
+///    ([`create_new`](std::fs::OpenOptions::create_new)). The unique
+///    suffix (`pid` + a per-process atomic counter, no `Date`/`rand`)
+///    plus `O_EXCL` means an attacker who pre-places a symlink at the
+///    temp path makes the create *fail* rather than following the link.
+/// 2. The temp file is `write_all` + `sync_all` (fsync), so its bytes are
+///    on stable storage before it is published.
+/// 3. The temp file is `rename`d over the target (atomic replace).
+/// 4. The parent directory is fsynced so the rename itself is durable —
+///    otherwise a crash could lose the directory entry and leave the old
+///    (or no) snapshot.
+///
+/// A crash at any point therefore leaves either the complete old snapshot
+/// or the complete new one, never a truncated `index-state.json`.
 ///
 /// # Errors
 ///
 /// Returns an I/O or serialization error when the snapshot cannot be
-/// written. Callers log-and-continue: a failed mirror must not fail the
-/// originating request, but it is surfaced for observability.
+/// written. On failure the temp file is best-effort removed so a failed
+/// save leaves no orphan behind.
 pub fn save(
     data_dir: &Path,
     crates: &BTreeMap<String, CrateRecord>,
@@ -180,16 +201,87 @@ pub fn save(
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
     let target = state_path(data_dir);
-    let tmp = target.with_extension("json.tmp");
-    std::fs::write(&tmp, &json)?;
-    std::fs::rename(&tmp, &target)?;
-    Ok(())
+    write_atomic_durable(data_dir, &target, &json)
+}
+
+/// Durably and atomically write `bytes` to `target` inside `dir`.
+///
+/// Shared by [`save`]; factored out so the temp-file lifecycle (create
+/// exclusive → write → fsync → rename → fsync dir, with cleanup on the
+/// error paths) lives in one place.
+fn write_atomic_durable(dir: &Path, target: &Path, bytes: &[u8]) -> Result<(), std::io::Error> {
+    // Try a few distinct unique names so a (vanishingly unlikely)
+    // pre-existing temp — e.g. a leftover from a crash, or an attacker's
+    // symlink — does not wedge the save permanently.
+    let mut last_err = None;
+    for _ in 0..16 {
+        let seq = SAVE_SEQ.fetch_add(1, Ordering::Relaxed);
+        let tmp = dir.join(format!(
+            "{STATE_FILE}.tmp.{pid}.{seq}",
+            pid = std::process::id()
+        ));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+        {
+            Ok(mut file) => {
+                // From here on the temp file exists; make sure every error
+                // path removes it.
+                let result = (|| {
+                    file.write_all(bytes)?;
+                    file.sync_all()?;
+                    drop(file);
+                    std::fs::rename(&tmp, target)?;
+                    sync_parent_dir(dir)
+                })();
+                if result.is_err() {
+                    // Best-effort cleanup; ignore the removal error so the
+                    // original failure is what surfaces.
+                    let _ = std::fs::remove_file(&tmp);
+                }
+                return result;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                // Name collision (O_EXCL): retry with the next counter.
+                last_err = Some(err);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "could not allocate a unique snapshot temp file",
+        )
+    }))
+}
+
+/// fsync `dir` so a preceding `rename` into it is durable.
+///
+/// Opening a directory read-only and `sync_all`-ing it is the POSIX
+/// idiom for flushing the directory entry. Platforms that cannot fsync a
+/// directory return an error which we tolerate, since the file data was
+/// already fsynced.
+fn sync_parent_dir(dir: &Path) -> Result<(), std::io::Error> {
+    match std::fs::File::open(dir) {
+        Ok(d) => match d.sync_all() {
+            Ok(()) => Ok(()),
+            // Some filesystems/platforms reject fsync on a directory
+            // handle; the file bytes are already durable, so don't fail
+            // the save over the (best-effort) directory flush.
+            Err(err) if err.kind() == std::io::ErrorKind::InvalidInput => Ok(()),
+            Err(err) => Err(err),
+        },
+        Err(err) => Err(err),
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{load, save, state_path};
+    use super::{STATE_FILE, load, save, state_path};
     use crate::index::IndexEntry;
+    use std::path::Path;
     use crate::owners::Owner;
     use crate::router::CrateRecord;
     use ferro_blob_store::Digest;
@@ -332,12 +424,76 @@ mod tests {
         );
     }
 
+    /// R3-5: a successful save publishes the target snapshot and leaves
+    /// **no** `index-state.json.tmp.*` temp file behind in the dir.
     #[test]
     fn save_is_atomic_no_tmp_left_behind() {
         let tmp = tempfile::TempDir::new().unwrap();
         let map = BTreeMap::new();
         save(tmp.path(), &map).unwrap();
-        let leftover = tmp.path().join("index-state.json.tmp");
-        assert!(!leftover.exists(), "temp file must be renamed away");
+        assert!(state_path(tmp.path()).exists(), "target written");
+        assert!(
+            no_temp_files(tmp.path()),
+            "no snapshot temp file may be left behind"
+        );
+    }
+
+    /// R3-5: repeated saves each round-trip and never accumulate temp
+    /// files, exercising the per-call unique temp name + cleanup.
+    #[test]
+    fn repeated_saves_round_trip_without_temp_buildup() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let tarball = b"durable";
+        let mut rec = CrateRecord {
+            entries: vec![entry("foo", "1.0.0", tarball)],
+            tarballs: BTreeMap::new(),
+            owners: vec![],
+        };
+        rec.tarballs
+            .insert("1.0.0".into(), Digest::sha256_of(tarball));
+        let mut map = BTreeMap::new();
+        map.insert("foo".to_owned(), rec);
+
+        for _ in 0..5 {
+            save(tmp.path(), &map).unwrap();
+        }
+        assert!(no_temp_files(tmp.path()), "no temp build-up across saves");
+        let loaded = load(tmp.path());
+        assert_eq!(loaded.get("foo").unwrap().entries[0].vers, "1.0.0");
+    }
+
+    /// R3-5: an attacker (or crash leftover) pre-placing a file at the
+    /// *next* temp name must not wedge the save — `create_new` (`O_EXCL`)
+    /// fails on that name and the writer retries the next unique suffix,
+    /// so the save still succeeds and the squatted file is untouched.
+    #[test]
+    fn save_handles_create_new_temp_collision() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // Reconstruct the exact name the next save attempt will try.
+        let seq = super::SAVE_SEQ.load(std::sync::atomic::Ordering::Relaxed);
+        let squat = tmp.path().join(format!(
+            "{STATE_FILE}.tmp.{pid}.{seq}",
+            pid = std::process::id()
+        ));
+        std::fs::write(&squat, b"squatter").unwrap();
+
+        let map = BTreeMap::new();
+        save(tmp.path(), &map).expect("save retries past the squatted temp");
+
+        assert!(state_path(tmp.path()).exists(), "target written");
+        // The squatted file is left exactly as it was (not clobbered).
+        assert_eq!(std::fs::read(&squat).unwrap(), b"squatter");
+    }
+
+    /// True when no snapshot temp file (`index-state.json.tmp.*`) remains
+    /// in `dir`.
+    fn no_temp_files(dir: &Path) -> bool {
+        let prefix = format!("{STATE_FILE}.tmp.");
+        !std::fs::read_dir(dir).unwrap().any(|e| {
+            e.unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(&prefix)
+        })
     }
 }
