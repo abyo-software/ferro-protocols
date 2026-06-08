@@ -1,0 +1,16 @@
+{{/* SPDX-License-Identifier: Apache-2.0 */}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ferro-cargo-registry-server.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "ferro-cargo-registry-server.labels" . | nindent 4 }}
+data:
+  # Non-secret runtime configuration surfaced as environment variables.
+  # The Deployment loads these via envFrom so a config edit + `helm upgrade`
+  # rolls the pod (the deployment carries a checksum annotation).
+  FERRO_CARGO_REGISTRY_LISTEN: "0.0.0.0:{{ .Values.service.port }}"
+  FERRO_CARGO_REGISTRY_DATA: {{ .Values.persistence.mountPath | quote }}
+  {{- with .Values.apiHost }}
+  FERRO_CARGO_REGISTRY_API: {{ . | quote }}
+  {{- end }}

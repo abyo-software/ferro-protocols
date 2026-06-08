@@ -1,0 +1,207 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Default values for the ferro-cargo-registry-server Helm chart.
+
+# -----------------------------------------------------------------------------
+# Image
+# -----------------------------------------------------------------------------
+image:
+  # GHCR image published from deploy/ferro-cargo-registry-server/Dockerfile
+  # on v* tags. Override to a private mirror in air-gapped / Artifactory
+  # setups, or to `ferro-cargo-registry-server` for kind/minikube +
+  # pre-loaded local images.
+  repository: ghcr.io/abyo-software/ferro-cargo-registry-server
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+# -----------------------------------------------------------------------------
+# Workload kind
+# -----------------------------------------------------------------------------
+# Deployment with a single replica is the default. The server persists the
+# sparse index + crate blobs to a single ReadWriteOnce PVC, so scaling
+# replicaCount > 1 requires either a RWX storage class or an external shared
+# backend — keep at 1 unless persistence.accessModes below is adjusted.
+kind: Deployment
+replicaCount: 1
+
+# -----------------------------------------------------------------------------
+# Naming overrides
+# -----------------------------------------------------------------------------
+nameOverride: ""
+fullnameOverride: ""
+
+# -----------------------------------------------------------------------------
+# ServiceAccount
+# -----------------------------------------------------------------------------
+# The server needs no Kubernetes API access — the account exists only so the
+# pod runs under a dedicated, automountable-token-free identity.
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+  automountServiceAccountToken: false
+
+# -----------------------------------------------------------------------------
+# Resources
+# -----------------------------------------------------------------------------
+# axum/tokio idle footprint is small; crate publish blob I/O is the main
+# driver. Conservative starting points — size limits.memory to the largest
+# concurrent publish working set plus headroom.
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: "1"
+    memory: 512Mi
+
+# -----------------------------------------------------------------------------
+# Persistence (sparse index + crate blob data directory)
+# -----------------------------------------------------------------------------
+# ferro-cargo-registry-server writes the sparse index + crate blobs under
+# FERRO_CARGO_REGISTRY_DATA. The chart provisions a PVC and mounts it there.
+# When persistence.enabled is false the server falls back to an emptyDir
+# (non-durable — pod restart loses the index + crates; test installs only).
+persistence:
+  enabled: true
+  # Mount path == FERRO_CARGO_REGISTRY_DATA (set on the container env below).
+  mountPath: /var/lib/ferro-cargo-registry
+  # Use an existingClaim to point at a pre-provisioned PVC instead of
+  # templating one here.
+  existingClaim: ""
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+  size: 20Gi
+  annotations: {}
+
+# -----------------------------------------------------------------------------
+# Published API host advertised in /config.json
+# -----------------------------------------------------------------------------
+# FERRO_CARGO_REGISTRY_API is the externally-reachable base URL cargo clients
+# use for sparse index + publish. Set this to your Ingress / LB hostname when
+# exposing the registry outside the cluster. Empty → server defaults to
+# http://<listen> (only correct for in-cluster / port-forward access).
+apiHost: ""
+
+# -----------------------------------------------------------------------------
+# Host namespace access
+# -----------------------------------------------------------------------------
+hostNetwork: false
+hostPID: false
+hostIPC: false
+dnsPolicy: ""
+
+# -----------------------------------------------------------------------------
+# Pod-level security
+# -----------------------------------------------------------------------------
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65534
+  runAsGroup: 65534
+  # fsGroup lets the non-root UID write to the PVC regardless of the
+  # storage class's default ownership.
+  fsGroup: 65534
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  runAsNonRoot: true
+  runAsUser: 65534
+  runAsGroup: 65534
+  capabilities:
+    drop:
+      - ALL
+
+# -----------------------------------------------------------------------------
+# Pod scheduling
+# -----------------------------------------------------------------------------
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+
+# -----------------------------------------------------------------------------
+# Lifecycle
+# -----------------------------------------------------------------------------
+# axum graceful shutdown drains in-flight requests; 30 s covers a slow
+# in-progress crate publish finishing.
+terminationGracePeriodSeconds: 30
+
+# -----------------------------------------------------------------------------
+# Probes
+# -----------------------------------------------------------------------------
+# Backed by /live (liveness) and /ready (readiness), both 200 OK. /healthz
+# returns {"status":"ok"} and backs the Docker HEALTHCHECK.
+probes:
+  liveness:
+    enabled: true
+    httpGet:
+      path: /live
+      port: 8081
+    initialDelaySeconds: 3
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+  readiness:
+    enabled: true
+    httpGet:
+      path: /ready
+      port: 8081
+    initialDelaySeconds: 1
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 3
+  startup:
+    enabled: false
+    httpGet:
+      path: /live
+      port: 8081
+    initialDelaySeconds: 0
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 30
+
+# -----------------------------------------------------------------------------
+# Service (exposes sparse index, /api/v1/crates/*, /live, /ready, /healthz)
+# -----------------------------------------------------------------------------
+service:
+  type: ClusterIP
+  port: 8081
+  annotations: {}
+
+# -----------------------------------------------------------------------------
+# Prometheus ServiceMonitor (prometheus-operator)
+# -----------------------------------------------------------------------------
+# NOTE (roadmap): ferro-cargo-registry-server does not yet expose a
+# Prometheus /metrics endpoint. This ServiceMonitor is authored for when it
+# does — it is DISABLED by default and scrapes `path: /metrics` once enabled.
+# Leaving it on today would produce scrape errors. Flip `enabled: true` only
+# after the server ships /metrics.
+serviceMonitor:
+  enabled: false
+  namespace: ""
+  path: /metrics
+  interval: 30s
+  scrapeTimeout: 10s
+  labels: {}
+  relabelings: []
+  metricRelabelings: []
+
+# -----------------------------------------------------------------------------
+# Pod annotations + labels
+# -----------------------------------------------------------------------------
+podAnnotations: {}
+podLabels: {}
+
+# -----------------------------------------------------------------------------
+# Environment variables
+# -----------------------------------------------------------------------------
+# FERRO_CARGO_REGISTRY_LISTEN / _DATA / _API are set by the chart from the
+# service.port / persistence.mountPath / apiHost values. Add extras here.
+extraEnv: []
+  # - name: RUST_LOG
+  #   value: info

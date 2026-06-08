@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: v2
+name: ferro-cargo-registry-server
+description: |
+  ferro-cargo-registry-server — Rust-native Cargo registry server.
+
+  Serves a Cargo sparse index plus the crate publish API
+  (`/api/v1/crates/new`) over HTTP, with JSON `/healthz` and plain `/live`
+  `/ready` probe endpoints. Persists the sparse index and crate blobs to a
+  filesystem data directory, so the chart ships a PersistentVolumeClaim and
+  mounts it at the data path. Production defaults: non-root (UID 65534),
+  read-only rootfs, dropped capabilities, seccomp RuntimeDefault.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">= 1.26.0-0"
+home: https://github.com/abyo-software/ferro-protocols
+sources:
+  - https://github.com/abyo-software/ferro-protocols
+keywords:
+  - cargo
+  - registry
+  - crates
+  - sparse-index
+  - rust
+maintainers:
+  - name: abyo software 合同会社 (abyo software LLC)
+    email: dev@abyo.net
+    url: https://github.com/abyo-software
+annotations:
+  category: Registry
+  licenses: Apache-2.0
+  artifacthub.io/license: Apache-2.0
+  artifacthub.io/prerelease: "false"
+  artifacthub.io/containsSecurityUpdates: "false"
+  artifacthub.io/changes: |
+    - kind: added
+      description: Initial Helm chart — Deployment + PVC + ConfigMap + Service + ServiceMonitor for ferro-cargo-registry-server 0.1.0

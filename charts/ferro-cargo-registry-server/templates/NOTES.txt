@@ -1,0 +1,47 @@
+ferro-cargo-registry-server {{ .Chart.AppVersion }} has been installed.
+
+Workload: {{ .Values.kind }} {{ include "ferro-cargo-registry-server.fullname" . }}
+Namespace: {{ .Release.Namespace }}
+
+{{- if .Values.persistence.enabled }}
+Persistence: PVC {{ include "ferro-cargo-registry-server.pvcName" . }} ({{ .Values.persistence.size }}) mounted at {{ .Values.persistence.mountPath }}
+{{- else }}
+Persistence: DISABLED — using an emptyDir. The index + crates are LOST on pod restart.
+{{- end }}
+
+{{- if not .Values.apiHost }}
+
+NOTE: apiHost is unset, so the registry advertises http://<listen> in
+/config.json. cargo clients OUTSIDE the cluster will not resolve that —
+set `apiHost` to your Ingress / LoadBalancer URL when exposing externally.
+{{- end }}
+
+Watch the rollout:
+
+  kubectl --namespace {{ .Release.Namespace }} rollout status {{ .Values.kind | lower }}/{{ include "ferro-cargo-registry-server.fullname" . }}
+
+Tail the logs:
+
+  kubectl --namespace {{ .Release.Namespace }} logs -l \
+      app.kubernetes.io/instance={{ .Release.Name }} -f --tail=50
+
+Hit the registry (port-forward from your shell):
+
+  kubectl --namespace {{ .Release.Namespace }} port-forward svc/{{ include "ferro-cargo-registry-server.fullname" . }} 8081:{{ .Values.service.port }}
+
+  curl -s http://localhost:8081/live          # liveness (200 OK)
+  curl -s http://localhost:8081/ready         # readiness (200 OK)
+  curl -s http://localhost:8081/healthz       # {"status":"ok"}
+  curl -s http://localhost:8081/config.json   # cargo sparse-index config
+
+Point cargo at it (~/.cargo/config.toml):
+
+  [registries.ferro]
+  index = "sparse+http://localhost:8081/index/"
+{{- if .Values.serviceMonitor.enabled }}
+
+ServiceMonitor is ENABLED. NOTE: ferro-cargo-registry-server does not yet
+expose a Prometheus /metrics endpoint (roadmap) — until it does, this will
+produce scrape errors. Disable it (`serviceMonitor.enabled=false`) if the
+server build you deployed has no /metrics.
+{{- end }}
