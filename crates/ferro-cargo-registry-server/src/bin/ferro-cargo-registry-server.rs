@@ -38,7 +38,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use ferro_blob_store::FsBlobStore;
-use ferro_cargo_registry_server::{CargoState, router};
+use ferro_cargo_registry_server::{CargoState, Metrics, instrument, router};
 use serde_json::json;
 
 /// Environment variable naming the blob-store data directory.
@@ -83,7 +83,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(FsBlobStore::new(&data_dir)?);
     let state = CargoState::new(store, api_host.clone());
 
-    let app = router(state).merge(probe_routes());
+    // Protocol surface + Kubernetes probes, wrapped in the Prometheus
+    // instrumentation middleware and `/metrics` endpoint. The crate-count
+    // gauges sample `state` on each scrape, so clone it for the router.
+    let app = instrument(
+        router(state.clone()).merge(probe_routes()),
+        Metrics::new(),
+        state,
+    );
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let bound = listener.local_addr()?;

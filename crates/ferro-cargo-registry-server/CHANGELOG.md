@@ -9,6 +9,20 @@ releases. Breaking changes will be released as a separate `v0.2.0`.
 ## [Unreleased]
 
 ### Added
+- **Prometheus `/metrics` endpoint + request instrumentation.** New
+  `metrics` module exposes a `GET /metrics` route (Prometheus text
+  exposition format) and a tower/axum middleware that records, by
+  `method` + matched-route `handler` + `status`, a request counter
+  (`ferrocargo_http_requests_total`), a latency histogram
+  (`ferrocargo_http_request_duration_seconds`), an in-flight gauge
+  (`ferrocargo_in_flight`), a `ferrocargo_build_info` gauge, and index
+  gauges `ferrocargo_crates_total` (distinct crate names) +
+  `ferrocargo_crate_versions` (distinct published versions);
+  `ferrocargo_storage_bytes` is registered but reads 0 until a
+  size-reporting backend is wired. Labels use the matched route pattern,
+  never raw crate names/versions, to keep cardinality bounded. Wired into
+  both `instrument()` (library) and the serve binary; the chart's
+  `ServiceMonitor` is now enabled by default.
 - **Runnable server binary** `ferro-cargo-registry-server`
   (`src/bin/ferro-cargo-registry-server.rs`): boots the Axum `router()`
   over a filesystem `FsBlobStore`, configurable via
@@ -53,6 +67,8 @@ releases. Breaking changes will be released as a separate `v0.2.0`.
 - Added `tracing-subscriber` (binary logging) and enabled the
   `rt-multi-thread` / `macros` / `net` / `signal` tokio features needed
   by the binary.
+- Added `prometheus` (0.14, Apache-2.0, `default-features = false`) for
+  the `/metrics` endpoint.
 
 ## [0.1.0] — 2026-05-04
 
