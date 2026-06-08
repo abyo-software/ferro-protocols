@@ -338,6 +338,134 @@ async fn upload_invalid_name_returns_400() {
     assert_error_code(&body, "NAME_INVALID");
 }
 
+/// Start an upload session and return its `Location` URL.
+async fn start_session(app: &Router, name: &str) -> String {
+    let (status, headers, _b) = send(
+        app,
+        method(Method::POST, &format!("/v2/{name}/blobs/uploads/"), Body::empty()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "start upload session");
+    headers[header::LOCATION].to_str().unwrap().to_owned()
+}
+
+#[tokio::test]
+async fn monolithic_upload_matching_digest_is_created() {
+    // Positive boundary for the integrity check
+    // `actual.algo() == digest.algo() && actual.hex() != digest.hex()`:
+    // a CORRECT digest must yield 201 Created and the blob must then be
+    // retrievable with exactly the bytes pushed. Paired with the
+    // `monolithic_upload_digest_mismatch_returns_400` test, this pins the
+    // `==`/`!=` algo comparison (mutating `==` to `!=` would accept a
+    // mismatched digest, which the mismatch test catches).
+    let app = app();
+    let payload = b"correct-monolithic-bytes";
+    let digest = Digest::sha256_of(payload).to_string();
+    let (status, _h, _b) = send(
+        &app,
+        method(
+            Method::POST,
+            &format!("/v2/repo/blobs/uploads/?digest={digest}"),
+            Body::from(&payload[..]),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "correct digest ⇒ 201");
+    // Round-trip: the stored bytes are exactly what we pushed.
+    let (status, _h, body) = send(&app, get(&format!("/v2/repo/blobs/{digest}"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, payload, "blob round-trips byte-for-byte");
+}
+
+#[tokio::test]
+async fn chunked_finish_appends_final_chunk_body() {
+    // `finish_upload` appends the PUT body when `!body.is_empty()`
+    // (line ~320). Deleting the `!` would skip the real final chunk, so
+    // the recomputed digest would not match and the PUT would fail.
+    // Here the WHOLE blob is delivered as the final-PUT body (no prior
+    // PATCH), so the append-on-finish path is load-bearing.
+    let app = app();
+    let location = start_session(&app, "repo").await;
+    let payload = b"finalized-in-one-put";
+    let digest = Digest::sha256_of(payload).to_string();
+    let (status, _h, _b) = send(
+        &app,
+        method(
+            Method::PUT,
+            &format!("{location}?digest={digest}"),
+            Body::from(&payload[..]),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "final-chunk PUT ⇒ 201");
+    // The exact bytes must be retrievable.
+    let (status, _h, body) = send(&app, get(&format!("/v2/repo/blobs/{digest}"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, payload, "final-chunk bytes were appended and stored");
+}
+
+#[tokio::test]
+async fn chunked_finish_with_wrong_digest_returns_400() {
+    // `finish_upload`'s digest check
+    // `declared.algo() == actual.algo() && actual.hex() != declared.hex()`
+    // (line ~350). A PUT declaring the wrong digest must be rejected with
+    // 400 DIGEST_INVALID. Mutating `==` to `!=` would skip verification
+    // (both sha256) and wrongly accept the mismatched bytes.
+    let app = app();
+    let location = start_session(&app, "repo").await;
+    let wrong = Digest::sha256_of(b"some-other-content").to_string();
+    let (status, _h, body) = send(
+        &app,
+        method(
+            Method::PUT,
+            &format!("{location}?digest={wrong}"),
+            Body::from(&b"actually-these-bytes"[..]),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "wrong digest ⇒ 400");
+    assert_error_code(&body, "DIGEST_INVALID");
+}
+
+#[tokio::test]
+async fn chunked_finish_increments_blob_gauge_for_new_blob() {
+    // `finish_upload` increments the distinct-blobs gauge only when the
+    // blob is NOT already present: `if !already_present { inc }`
+    // (line ~365). Deleting the `!` would increment only for duplicates,
+    // so a brand-new blob completed via the chunked PUT path would leave
+    // the gauge at 0. Drive the gauge through `/metrics` and assert it
+    // reaches 1 after finishing a fresh blob.
+    let blob_store: SharedBlobStore = Arc::new(InMemoryBlobStore::new());
+    let registry = Arc::new(InMemoryRegistryMeta::new());
+    let state = AppState::new(blob_store, registry);
+    let blob_count = state.blob_count_handle();
+    let app = ferro_oci_server::instrument(router(state), ferro_oci_server::Metrics::new(), blob_count);
+
+    let location = start_session(&app, "repo").await;
+    let payload = b"freshly-chunk-finished-blob";
+    let digest = Digest::sha256_of(payload).to_string();
+    let (status, _h, _b) = send(
+        &app,
+        method(
+            Method::PUT,
+            &format!("{location}?digest={digest}"),
+            Body::from(&payload[..]),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (_s, _h, body) = send(&app, get("/metrics")).await;
+    let text = String::from_utf8(body).expect("utf8");
+    let counted = text
+        .lines()
+        .any(|l| l == "ferrooci_storage_blobs 1");
+    assert!(
+        counted,
+        "a new blob finished via chunked PUT must increment the gauge to 1:\n{text}"
+    );
+}
+
 // ---- catalog.rs + tags.rs ----------------------------------------------
 
 #[tokio::test]

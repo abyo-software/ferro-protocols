@@ -591,3 +591,101 @@ async fn check_blob_present(state: &AppState, digest_str: &str) -> Result<(), Oc
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ByteRangeOutcome, parse_byte_range, range_or_full_response,
+    };
+    use axum::http::{HeaderMap, StatusCode, header};
+    use bytes::Bytes;
+    use ferro_blob_store::Digest;
+
+    fn range_headers(value: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(header::RANGE, value.parse().expect("range header"));
+        h
+    }
+
+    #[test]
+    fn parse_byte_range_equal_bounds_is_satisfiable() {
+        // `if start > end { Unsatisfiable }`. Boundary `bytes=5-5`:
+        // `>` ⇒ Range{5,5}, mutated `>=` ⇒ Unsatisfiable. Assert Range.
+        assert_eq!(
+            parse_byte_range("bytes=5-5"),
+            ByteRangeOutcome::Range { start: 5, end: 5 },
+        );
+        // A genuinely reversed range stays Unsatisfiable.
+        assert_eq!(
+            parse_byte_range("bytes=6-5"),
+            ByteRangeOutcome::Unsatisfiable,
+        );
+    }
+
+    #[test]
+    fn range_request_for_last_byte_is_partial_not_unsatisfiable() {
+        // Body "hello" (len 5, last index 4). `start > last`:
+        //   - start == 4 (last byte): `>` false ⇒ 206 Partial.
+        //     Mutated `>=` ⇒ 416. Assert 206 + exact slice.
+        //   - start == 5 (== total): past the end ⇒ 416 either way.
+        let body = Bytes::from_static(b"hello");
+        let digest = Digest::sha256_of(&body);
+
+        let resp = range_or_full_response(
+            &range_headers("bytes=4-4"),
+            &digest,
+            "application/octet-stream",
+            &body,
+        );
+        assert_eq!(
+            resp.status(),
+            StatusCode::PARTIAL_CONTENT,
+            "requesting the last byte is satisfiable (206)"
+        );
+        // `slice_len = clamped_end - start + 1` = 1 here; mutating `-`
+        // to `+` would yield 4+4+1 = 9 in Content-Length. Assert 1.
+        assert_eq!(
+            resp.headers()[header::CONTENT_LENGTH],
+            "1",
+            "single-byte range has Content-Length 1"
+        );
+        assert_eq!(
+            resp.headers()[header::CONTENT_RANGE],
+            "bytes 4-4/5",
+            "Content-Range names the exact byte"
+        );
+
+        let past = range_or_full_response(
+            &range_headers("bytes=5-9"),
+            &digest,
+            "application/octet-stream",
+            &body,
+        );
+        assert_eq!(
+            past.status(),
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            "a start past the end is 416"
+        );
+    }
+
+    #[test]
+    fn multi_byte_range_content_length_is_exact() {
+        // Body of 10 bytes, range bytes=2-7 ⇒ 6 bytes. `slice_len =
+        // clamped_end - start + 1` = 7-2+1 = 6. Mutating `-` to `+`
+        // would give 7+2+1 = 10. Assert Content-Length 6.
+        let body = Bytes::from_static(b"0123456789");
+        let digest = Digest::sha256_of(&body);
+        let resp = range_or_full_response(
+            &range_headers("bytes=2-7"),
+            &digest,
+            "application/octet-stream",
+            &body,
+        );
+        assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            resp.headers()[header::CONTENT_LENGTH],
+            "6",
+            "bytes=2-7 spans exactly 6 bytes"
+        );
+    }
+}

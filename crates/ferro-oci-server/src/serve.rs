@@ -328,4 +328,75 @@ mod tests {
         init_tracing();
         init_tracing();
     }
+
+    #[tokio::test]
+    async fn build_app_persisted_serves_v2_and_survives_restart() {
+        // `build_app_persisted` must return a real, wired router (not an
+        // empty `Router::default()`): it has to route `/v2/` AND persist
+        // metadata under the storage dir so a rebuilt app still resolves a
+        // pushed blob. An empty default router would 404 the `/v2/` probe
+        // and store nothing, so this kills the `-> Default::default()`
+        // mutant.
+        use super::build_app_persisted;
+        use axum::http::Method;
+        use ferro_blob_store::{Digest, InMemoryBlobStore};
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let dir = tmp.path();
+        let store = std::sync::Arc::new(InMemoryBlobStore::new());
+
+        let app = build_app_persisted(store.clone(), dir);
+
+        // The version endpoint is wired (an empty router would 404).
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v2/")
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::OK, "GET /v2/ on persisted app");
+
+        // Push a manifest by digest so metadata is mirrored to disk.
+        let body = b"{\"schemaVersion\":2}";
+        let digest = Digest::sha256_of(&body[..]).to_string();
+        let put = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri(format!("/v2/repo/manifests/{digest}"))
+                    .header(
+                        "content-type",
+                        "application/vnd.oci.image.manifest.v1+json",
+                    )
+                    .body(Body::from(&body[..]))
+                    .expect("req"),
+            )
+            .await
+            .expect("put resp");
+        assert_eq!(put.status(), StatusCode::CREATED, "manifest PUT");
+
+        // Rebuild from the SAME dir: the persisted manifest must resolve,
+        // which a `Default::default()` router (no persistence wiring)
+        // could never do.
+        let app2 = build_app_persisted(store, dir);
+        let head = app2
+            .oneshot(
+                Request::builder()
+                    .method(Method::HEAD)
+                    .uri(format!("/v2/repo/manifests/{digest}"))
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("head resp");
+        assert_eq!(
+            head.status(),
+            StatusCode::OK,
+            "manifest survives a simulated restart of the persisted app"
+        );
+    }
 }

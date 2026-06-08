@@ -427,3 +427,32 @@ fn blob_created_response(name: &str, digest: &Digest) -> Response {
     headers.insert(header::CONTENT_LENGTH, HeaderValue::from(0u64));
     (StatusCode::CREATED, headers).into_response()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::would_exceed_cap;
+
+    #[test]
+    fn would_exceed_cap_boundary_is_inclusive_under_strict_greater() {
+        // `current.saturating_add(incoming) > cap`. Boundary trio at
+        // cap = 10:
+        //   - 5 + 5 == 10  → NOT exceeding (`>` false). Mutating `>` to
+        //     `>=` would wrongly reject this exact-fit chunk.
+        //   - 5 + 4 == 9   → under, not exceeding.
+        //   - 5 + 6 == 11  → over, exceeding.
+        assert!(
+            !would_exceed_cap(10, 5, 5),
+            "exact fit (sum == cap) must be allowed"
+        );
+        assert!(!would_exceed_cap(10, 5, 4), "under cap is allowed");
+        assert!(would_exceed_cap(10, 5, 6), "over cap is rejected");
+    }
+
+    #[test]
+    fn would_exceed_cap_saturates_on_overflow() {
+        // A would-be u64 overflow saturates to u64::MAX, which exceeds
+        // any finite cap (so a malicious huge `incoming` is rejected, not
+        // wrapped to a small sum).
+        assert!(would_exceed_cap(1024, u64::MAX, u64::MAX));
+    }
+}
