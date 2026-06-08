@@ -13,11 +13,10 @@
 //! Spec: POM Reference —
 //! <https://maven.apache.org/ref/3.9.6/maven-model/maven.html>.
 
-use std::panic::AssertUnwindSafe;
-
 use serde::Deserialize;
 
 use crate::error::MavenError;
+use crate::xml::from_str_panic_safe;
 
 /// Parsed POM document (subset).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,36 +56,18 @@ pub struct PomParent {
 ///
 /// # Panic safety
 ///
-/// The XML deserialisation step is wrapped in `std::panic::catch_unwind`
-/// because `quick_xml::de` 0.39.2 hits an `unreachable!()` macro at
-/// `quick-xml-0.39.2/src/de/mod.rs:2903:37` on certain malformed inputs
-/// (e.g. mixed `<><groupId.p... <!DOCTYPe.;:="0"1"...` shapes — see the
-/// 2026-05-15 fuzz artifact `crash-1ceeadf1`). Production callers
-/// (`ferro-maven-server` registry PUT handler) must never abort on
-/// attacker-supplied POM bodies, so the panic is converted into
-/// [`MavenError::InvalidPom`] just like every other parse failure.
+/// The XML deserialisation step is routed through
+/// [`crate::xml::from_str_panic_safe`], which wraps `quick_xml::de` in
+/// `std::panic::catch_unwind` because `quick_xml::de` 0.39.2 hits an
+/// `unreachable!()` macro at `quick-xml-0.39.2/src/de/mod.rs:2903:37`
+/// on certain malformed inputs (e.g. mixed `<><groupId.p...
+/// <!DOCTYPe.;:="0"1"...` shapes — see the 2026-05-15 fuzz artifact
+/// `crash-1ceeadf1`). Production callers (`ferro-maven-server`
+/// registry PUT handler) must never abort on attacker-supplied POM
+/// bodies, so the panic is converted into [`MavenError::InvalidPom`]
+/// just like every other parse failure.
 pub fn parse_pom(xml: &str) -> Result<Pom, MavenError> {
-    let parse_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        quick_xml::de::from_str::<RawPom>(xml)
-    }));
-    let raw: RawPom = match parse_result {
-        Ok(Ok(raw)) => raw,
-        Ok(Err(e)) => {
-            return Err(MavenError::InvalidPom(format!("XML parse failed: {e}")));
-        }
-        Err(panic_payload) => {
-            let msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
-                (*s).to_string()
-            } else if let Some(s) = panic_payload.downcast_ref::<String>() {
-                s.clone()
-            } else {
-                "non-string panic payload".to_string()
-            };
-            return Err(MavenError::InvalidPom(format!(
-                "XML parser panicked on malformed input: {msg}"
-            )));
-        }
-    };
+    let raw: RawPom = from_str_panic_safe(xml, MavenError::InvalidPom)?;
 
     let parent = raw.parent.as_ref().map(|p| PomParent {
         group_id: p.group_id.clone().unwrap_or_default(),

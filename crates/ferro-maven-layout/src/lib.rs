@@ -30,6 +30,7 @@ pub mod layout;
 pub mod metadata;
 pub mod pom;
 pub mod snapshot;
+mod xml;
 
 #[cfg(feature = "http")]
 #[cfg_attr(docsrs, doc(cfg(feature = "http")))]

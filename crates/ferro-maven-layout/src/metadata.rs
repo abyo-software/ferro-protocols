@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::MavenError;
 use crate::snapshot::is_snapshot_version;
+use crate::xml::from_str_panic_safe;
 
 /// The `maven-metadata.xml` document type.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -197,9 +198,19 @@ impl MavenMetadata {
     /// Returns [`MavenError::InvalidMetadata`] when the XML is
     /// malformed or missing the top-level `<metadata>` / `<groupId>` /
     /// `<artifactId>` elements.
+    ///
+    /// # Panic safety
+    ///
+    /// Like [`crate::parse_pom`], the deserialisation step is routed
+    /// through [`crate::xml::from_str_panic_safe`] so that the
+    /// `quick_xml::de` 0.39.2 `unreachable!()` panic (`de/mod.rs:2903`)
+    /// on malformed input becomes a clean [`MavenError::InvalidMetadata`]
+    /// rather than aborting the request thread. This boundary is
+    /// network-reachable through the Maven `maven-metadata.xml`
+    /// `PUT`/`GET` handler, so an attacker-supplied body must never
+    /// crash the registry process.
     pub fn from_xml(xml: &str) -> Result<Self, MavenError> {
-        let raw: RawMetadata = quick_xml::de::from_str(xml)
-            .map_err(|e| MavenError::InvalidMetadata(format!("XML parse failed: {e}")))?;
+        let raw: RawMetadata = from_str_panic_safe(xml, MavenError::InvalidMetadata)?;
         let group_id = raw.group_id.unwrap_or_default();
         let artifact_id = raw.artifact_id.unwrap_or_default();
         if group_id.is_empty() || artifact_id.is_empty() {
@@ -372,5 +383,57 @@ mod tests {
         assert_eq!(parsed.version.as_deref(), Some("1.2.3-SNAPSHOT"));
         assert_eq!(parsed.snapshot.expect("snap").build_number, 3);
         assert_eq!(parsed.snapshot_versions.len(), 1);
+    }
+
+    #[test]
+    fn malformed_xml_fails() {
+        let err = MavenMetadata::from_xml("<metadata><artifactId>oops")
+            .expect_err("reject truncated metadata");
+        assert!(err.to_string().contains("XML parse failed"));
+    }
+
+    /// DoS-parity regression with `pom::tests::
+    /// quick_xml_unreachable_panic_caught_2026_05_15`. The
+    /// `maven-metadata.xml` `from_xml` boundary is network-reachable
+    /// through the Maven `PUT`/`GET` metadata handler, so the same
+    /// `quick_xml::de` 0.39.2 `unreachable!()` panic (`de/mod.rs:2903`)
+    /// that aborts on malformed POM bodies must be panic-shielded here
+    /// too. We feed the exact 173-byte fuzz artifact
+    /// `crash-1ceeadf1` verbatim and assert an `Err`, not an abort.
+    ///
+    /// Before the `from_str_panic_safe` wrap this test panicked
+    /// ("entered unreachable code") and aborted the test process;
+    /// after the wrap it returns `Err(InvalidMetadata)`. If quick-xml
+    /// is updated and stops panicking, this still passes (it lands in
+    /// the `Ok(Err(_))` / "XML parse failed" branch instead).
+    #[test]
+    fn quick_xml_unreachable_panic_caught_metadata() {
+        // Same bytes as the POM fuzz artifact
+        // `fuzz/known-crash/maven_pom_parse/crash-1ceeadf1-...` (173 B);
+        // the panic is in shared quick-xml deserialisation, independent
+        // of the target struct, so the POM crash input reproduces it
+        // against `RawMetadata` too.
+        let bytes: &[u8] = &[
+            0x3c, 0x3e, 0x3c, 0x67, 0x72, 0x6f, 0x75, 0x70, 0x49, 0x64, 0x09, 0x70, 0x0a, 0x2e,
+            0x0a, 0x24, 0x0a, 0x02, 0x0a, 0x2e, 0x3e, 0x3e, 0x23, 0x3e, 0x3c, 0x21, 0x44, 0x4f,
+            0x43, 0x54, 0x59, 0x50, 0x65, 0x09, 0x3b, 0x3a, 0x3d, 0x22, 0x22, 0x3a, 0x0d, 0x2f,
+            0x3e, 0x3c, 0x21, 0x44, 0x4f, 0x43, 0x54, 0x59, 0x50, 0x65, 0x09, 0x3b, 0x3a, 0x3d,
+            0x22, 0x30, 0x22, 0x31, 0x22, 0x2e, 0x3c, 0x2f, 0x3e, 0x3c, 0x22, 0x3e, 0x23, 0x3e,
+            0x3c, 0x21, 0x44, 0x4f, 0x43, 0x54, 0x59, 0x50, 0x65, 0x09, 0x3b, 0x3a, 0x3d, 0x22,
+            0x22, 0x3a, 0x0d, 0x2f, 0x3e, 0x3c, 0x21, 0x44, 0x4f, 0x43, 0x54, 0x59, 0x50, 0x65,
+            0x09, 0x3b, 0x3a, 0x3d, 0x22, 0x30, 0x22, 0x31, 0x22, 0x2e, 0x3c, 0x2f, 0x3e, 0x3c,
+            0x2f, 0x3e, 0x3c, 0x2f, 0x22, 0x3e, 0x3e, 0x0a, 0x05, 0x0a, 0x23, 0x0a, 0x70, 0x0a,
+            0x05, 0x0a, 0x02, 0x0a, 0x70, 0x0a, 0x00, 0x0a, 0x05, 0x0a, 0x57, 0x0a, 0x02, 0x0a,
+            0x70, 0x0a, 0x23, 0x0a, 0x05, 0x0a, 0x02, 0x0a, 0x2e, 0x0a, 0x05, 0x0a, 0x23, 0x0a,
+            0x70, 0x0a, 0x05, 0x0a, 0x02, 0x0a, 0x2e, 0x0a, 0x05, 0x0a, 0x57, 0x0a, 0x2e, 0x0a,
+            0x49, 0x0a, 0x49, 0x0a, 0x3e,
+        ];
+        let s = std::str::from_utf8(bytes).expect("artifact bytes are valid UTF-8");
+        let err = MavenMetadata::from_xml(s).expect_err("must reject without panicking");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("XML parse failed") || msg.contains("XML parser panicked"),
+            "unexpected error: {msg}"
+        );
     }
 }
