@@ -31,6 +31,7 @@ futures = "0.3"
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 parking_lot = "0.12"
+prometheus = { version = "0.14", default-features = false }
 
 [[bin]]
 name = "ferro-oci-server"

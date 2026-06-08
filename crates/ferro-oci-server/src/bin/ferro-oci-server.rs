@@ -33,7 +33,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ferro_blob_store::{FsBlobStore, InMemoryBlobStore, SharedBlobStore};
-use ferro_oci_server::{AppState, InMemoryRegistryMeta, probe_routes, router};
+use ferro_oci_server::{AppState, InMemoryRegistryMeta, Metrics, instrument, probe_routes, router};
 
 /// Server configuration, sourced from the environment.
 #[derive(Debug, Clone)]
@@ -89,10 +89,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let blob_store = config.blob_store()?;
     let registry = Arc::new(InMemoryRegistryMeta::new());
-    let state = AppState::new(blob_store, registry);
+    let state = AppState::new(blob_store.clone(), registry);
 
-    // OCI `/v2/**` surface + Kubernetes health probes.
-    let app = router(state).merge(probe_routes());
+    // OCI `/v2/**` surface + Kubernetes health probes, wrapped in the
+    // Prometheus instrumentation middleware and `/metrics` endpoint.
+    let app = instrument(router(state).merge(probe_routes()), Metrics::new(), blob_store);
 
     let addr: SocketAddr = config
         .listen
