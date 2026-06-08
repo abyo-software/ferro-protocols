@@ -4,11 +4,17 @@
 [![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](../../LICENSE)
 [![crates.io](https://img.shields.io/crates/v/ferro-cargo-registry-server.svg)](https://crates.io/crates/ferro-cargo-registry-server)
 [![docs.rs](https://docs.rs/ferro-cargo-registry-server/badge.svg)](https://docs.rs/ferro-cargo-registry-server)
+[![CI](https://github.com/abyo-software/ferro-protocols/actions/workflows/ci.yml/badge.svg)](https://github.com/abyo-software/ferro-protocols/actions/workflows/ci.yml)
 [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](../../rust-toolchain.toml)
 
 **Embeddable** server-side primitives for the
 [Cargo Alternative Registry Protocol](https://doc.rust-lang.org/cargo/reference/registries.html#registry-protocols),
-sparse-index variant.
+sparse-index variant
+([RFC 2789](https://rust-lang.github.io/rfcs/2789-sparse-index.html),
+extending the alternative-registries
+[RFC 2141](https://rust-lang.github.io/rfcs/2141-alternative-registries.html)).
+Ships both an **embeddable Axum router** and a **runnable server
+binary**.
 
 > [Cargo's Alternative Registry RFC 2141](https://rust-lang.github.io/rfcs/2141-alternative-registries.html)
 > was accepted in 2018. The widely-used full-server implementation,
@@ -78,11 +84,33 @@ axum::serve(listener, app).await?;
 # Ok(()) }
 ```
 
-Client-side: point `cargo` at it via `~/.cargo/config.toml`:
+### Run the bundled server binary
+
+No glue code required — the crate ships a runnable binary:
+
+```bash
+FERRO_CARGO_REGISTRY_LISTEN=0.0.0.0:8081 \
+FERRO_CARGO_REGISTRY_DATA=./registry-data \
+FERRO_CARGO_REGISTRY_API=http://127.0.0.1:8081 \
+  cargo run --bin ferro-cargo-registry-server
+```
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `FERRO_CARGO_REGISTRY_DATA`   | `./registry-data` | Blob-store data directory |
+| `FERRO_CARGO_REGISTRY_LISTEN` | `0.0.0.0:8081`    | Listen socket address |
+| `FERRO_CARGO_REGISTRY_API`    | `http://<listen>` | API host advertised in `/config.json` |
+
+The binary mounts Kubernetes-style probes alongside the protocol
+routes: `GET /live`, `GET /ready`, and `GET /healthz`
+(`{"status":"ok"}`). Shutdown is graceful on `SIGTERM` / Ctrl-C.
+
+Client-side: point `cargo` at it via `~/.cargo/config.toml`. The index
+base is the **server root** for the bundled binary:
 
 ```toml
 [registries.my-registry]
-index = "sparse+https://my-registry.example.com/index/"
+index = "sparse+https://my-registry.example.com/"
 
 # Optional — make this the default for `cargo publish`:
 # [registry]
@@ -113,7 +141,9 @@ into the `router()` returned by this crate.
 | Aspect | Status |
 |---|---|
 | API stability | **beta** (`v0.1.x`) — additive-only between minors |
-| Sparse index | working |
+| Runnable binary | yes (`ferro-cargo-registry-server`) with `/live` `/ready` `/healthz` |
+| Real-`cargo` e2e | publish / fetch / yank / unyank verified (`tests/cargo_e2e.rs`) |
+| Sparse index | working (root-relative and `/index/` prefix layouts) |
 | Git index | not yet |
 | Authentication | scaffold only — wire your own middleware |
 | TUF metadata | not in this crate (Phase 3, separate) |
