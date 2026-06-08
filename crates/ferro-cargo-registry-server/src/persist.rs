@@ -69,9 +69,15 @@ pub fn state_path(data_dir: &Path) -> PathBuf {
 /// A missing snapshot yields an empty map (first boot). A snapshot that
 /// cannot be read or parsed is logged and treated as empty, so a corrupt
 /// state file never blocks startup. Each entry's `cksum` is parsed back
-/// into the version → tarball [`Digest`] map; an entry whose `cksum` is
-/// not a valid SHA-256 hex is kept in the index but contributes no
-/// download mapping (a warning is logged).
+/// into the version → tarball [`Digest`] map.
+///
+/// An entry whose `cksum` is not a valid SHA-256 hex is treated as
+/// **corrupt** (R3-4): the version entry is **dropped** — both from the
+/// served index and from the download map — rather than retained, because
+/// a retained-but-unmapped entry advertises a version that can never be
+/// downloaded *and* blocks a clean republish (it looks like a duplicate).
+/// If every version of a crate is corrupt the crate is dropped entirely.
+/// Each drop is logged.
 #[must_use]
 pub fn load(data_dir: &Path) -> BTreeMap<String, CrateRecord> {
     let path = state_path(data_dir);
@@ -98,25 +104,40 @@ pub fn load(data_dir: &Path) -> BTreeMap<String, CrateRecord> {
     let mut out = BTreeMap::new();
     for (key, rec) in snapshot.crates {
         let mut tarballs = BTreeMap::new();
-        for entry in &rec.entries {
+        let mut entries = Vec::with_capacity(rec.entries.len());
+        for entry in rec.entries {
             match Digest::new(DigestAlgo::Sha256, entry.cksum.clone()) {
                 Ok(digest) => {
                     tarballs.insert(entry.vers.clone(), digest);
+                    entries.push(entry);
                 }
                 Err(err) => {
+                    // R3-4: an un-parseable cksum makes the version
+                    // undownloadable. Drop it from the index entirely
+                    // rather than advertising a phantom version that also
+                    // blocks republish.
                     tracing::warn!(
                         crate_key = %key,
                         version = %entry.vers,
                         %err,
-                        "snapshot entry has an invalid cksum; download mapping skipped"
+                        "snapshot entry has an invalid cksum; dropping corrupt version"
                     );
                 }
             }
         }
+        if entries.is_empty() {
+            // Every version was corrupt — drop the crate so it does not
+            // appear as an empty, unservable record.
+            tracing::warn!(
+                crate_key = %key,
+                "all versions had invalid cksums; dropping corrupt crate"
+            );
+            continue;
+        }
         out.insert(
             key,
             CrateRecord {
-                entries: rec.entries,
+                entries,
                 tarballs,
                 owners: rec.owners,
             },
@@ -234,6 +255,81 @@ mod tests {
         // tarballs map rebuilt from the entry cksum.
         let digest = got.tarballs.get("1.0.0").expect("digest rebuilt");
         assert_eq!(*digest, Digest::sha256_of(tarball));
+    }
+
+    /// R3-4: a snapshot carrying one valid version and one whose `cksum`
+    /// is not a parseable SHA-256 digest must load with **only** the valid
+    /// version. The corrupt entry is dropped from both the served index
+    /// and the download map, so the version is no longer advertised and is
+    /// freely republishable.
+    #[test]
+    fn load_drops_entry_with_invalid_cksum() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let valid = entry("foo", "1.0.0", b"good-bytes");
+        // A non-hex / wrong-length cksum is not a valid SHA-256 digest.
+        let mut corrupt = entry("foo", "2.0.0", b"ignored");
+        corrupt.cksum = "not-a-real-digest".to_owned();
+
+        let json = serde_json::json!({
+            "crates": {
+                "foo": {
+                    "entries": [valid, corrupt],
+                    "owners": []
+                }
+            }
+        });
+        std::fs::write(
+            state_path(tmp.path()),
+            serde_json::to_vec(&json).unwrap(),
+        )
+        .unwrap();
+
+        let loaded = load(tmp.path());
+        let got = loaded.get("foo").expect("crate still present");
+        // Only the valid version survives, in the index and the map.
+        assert_eq!(got.entries.len(), 1, "corrupt version dropped from index");
+        assert_eq!(got.entries[0].vers, "1.0.0");
+        assert!(
+            got.tarballs.contains_key("1.0.0"),
+            "valid version downloadable"
+        );
+        assert!(
+            !got.tarballs.contains_key("2.0.0"),
+            "corrupt version has no download mapping"
+        );
+        assert!(
+            !got.entries.iter().any(|e| e.vers == "2.0.0"),
+            "corrupt version no longer advertised → republishable"
+        );
+    }
+
+    /// R3-4 corollary: a crate whose *every* version has an invalid cksum
+    /// is dropped entirely rather than loaded as an empty, unservable
+    /// record.
+    #[test]
+    fn load_drops_crate_when_all_versions_corrupt() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut c1 = entry("bar", "1.0.0", b"x");
+        c1.cksum = "zz".to_owned();
+        let mut c2 = entry("bar", "2.0.0", b"y");
+        c2.cksum = String::new();
+
+        let json = serde_json::json!({
+            "crates": {
+                "bar": { "entries": [c1, c2], "owners": [] }
+            }
+        });
+        std::fs::write(
+            state_path(tmp.path()),
+            serde_json::to_vec(&json).unwrap(),
+        )
+        .unwrap();
+
+        let loaded = load(tmp.path());
+        assert!(
+            !loaded.contains_key("bar"),
+            "fully-corrupt crate dropped, not loaded empty"
+        );
     }
 
     #[test]
