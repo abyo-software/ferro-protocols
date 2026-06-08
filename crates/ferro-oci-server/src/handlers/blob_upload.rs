@@ -27,6 +27,27 @@ use crate::reference::validate_name;
 use crate::router::AppState;
 use crate::upload::ContentRange;
 
+/// Build the `413 Payload Too Large` response emitted when an upload
+/// session would exceed its byte cap (the memory-exhaustion `DoS` bound,
+/// [`crate::upload::MAX_UPLOAD_SESSION_BYTES`] by default).
+fn upload_too_large(cap: u64, current: u64, incoming: u64) -> Response {
+    OciError::new(
+        OciErrorCode::BlobUploadInvalid,
+        format!(
+            "upload exceeds the {cap}-byte session cap \
+             (buffered {current}, incoming {incoming})"
+        ),
+    )
+    .with_status(StatusCode::PAYLOAD_TOO_LARGE)
+    .into_response()
+}
+
+/// True when appending `incoming` bytes to a session already holding
+/// `current` bytes would exceed `cap`.
+const fn would_exceed_cap(cap: u64, current: u64, incoming: u64) -> bool {
+    current.saturating_add(incoming) > cap
+}
+
 fn parse_digest(s: &str) -> Result<Digest, OciError> {
     s.parse::<Digest>().map_err(|e| {
         OciError::new(
@@ -103,6 +124,7 @@ pub async fn init_upload(
         if let Err(e) = state.blob_store.put(&digest, body).await {
             return OciError::from(e).into_response();
         }
+        state.inc_blob_count();
         return blob_created_response(name, &digest);
     }
 
@@ -152,8 +174,8 @@ pub async fn patch_upload(
                 return OciError::new(OciErrorCode::BlobUploadInvalid, "non-ASCII Content-Range")
                     .into_response();
             };
-            match ContentRange::parse(s) {
-                Ok(r) => r.start,
+            let range = match ContentRange::parse(s) {
+                Ok(r) => r,
                 Err(e) => {
                     return OciError::new(
                         OciErrorCode::BlobUploadInvalid,
@@ -161,7 +183,26 @@ pub async fn patch_upload(
                     )
                     .into_response();
                 }
+            };
+            // Spec §4.3: the inclusive `<start>-<end>` range must match
+            // the chunk actually carried in the body. A request claiming
+            // `0-999999` while sending one byte is malformed and, left
+            // unchecked, lets a client lie about its offsets. The
+            // inclusive length is `end - start + 1`.
+            let declared_len = range.length();
+            if declared_len != body.len() as u64 {
+                return OciError::new(
+                    OciErrorCode::BlobUploadInvalid,
+                    format!(
+                        "Content-Range length mismatch: range `{s}` spans {declared_len} bytes \
+                         but body carries {}",
+                        body.len()
+                    ),
+                )
+                .with_status(StatusCode::RANGE_NOT_SATISFIABLE)
+                .into_response();
             }
+            range.start
         }
         None => expected_offset,
     };
@@ -173,6 +214,16 @@ pub async fn patch_upload(
         )
         .with_status(StatusCode::RANGE_NOT_SATISFIABLE)
         .into_response();
+    }
+
+    // Bound the session size before buffering the chunk so an
+    // unauthenticated client cannot grow the in-memory buffer without
+    // limit. On overflow we drop the session so the buffered bytes are
+    // freed immediately.
+    let cap = state.max_upload_session_bytes();
+    if would_exceed_cap(cap, expected_offset, body.len() as u64) {
+        let _ = state.registry.cancel_upload(name, uuid).await;
+        return upload_too_large(cap, expected_offset, body.len() as u64);
     }
 
     let new_offset = match state
@@ -230,14 +281,21 @@ pub async fn finish_upload(
         .into_response();
     };
 
-    // Append the final chunk if the PUT carried one.
-    if !body.is_empty()
-        && let Err(e) = state
+    // Append the final chunk if the PUT carried one, enforcing the
+    // session size cap first.
+    if !body.is_empty() {
+        let cap = state.max_upload_session_bytes();
+        if would_exceed_cap(cap, state_snapshot.offset(), body.len() as u64) {
+            let _ = state.registry.cancel_upload(name, uuid).await;
+            return upload_too_large(cap, state_snapshot.offset(), body.len() as u64);
+        }
+        if let Err(e) = state
             .registry
             .append_upload(name, uuid, state_snapshot.offset(), body)
             .await
-    {
-        return OciError::from(e).into_response();
+        {
+            return OciError::from(e).into_response();
+        }
     }
 
     // Take the accumulated bytes and hand them to the blob store.
@@ -266,6 +324,7 @@ pub async fn finish_upload(
     if let Err(e) = state.blob_store.put(&declared, bytes).await {
         return OciError::from(e).into_response();
     }
+    state.inc_blob_count();
     if let Err(e) = state.registry.complete_upload(name, uuid, &declared).await {
         return OciError::from(e).into_response();
     }

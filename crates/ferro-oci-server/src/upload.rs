@@ -19,6 +19,25 @@
 
 use bytes::{Bytes, BytesMut};
 
+/// Maximum number of bytes a single in-flight upload session may
+/// accumulate before the server refuses further chunks.
+///
+/// The OCI Distribution Spec does not mandate a hard maximum blob size,
+/// but §4.3 chunked uploads buffer bytes server-side, and an
+/// unauthenticated client can otherwise open sessions and append
+/// sub-limit chunks until process memory is exhausted (a
+/// memory-exhaustion `DoS`). We bound each session at 4 GiB — large enough
+/// for the multi-gigabyte layers real images carry, while still being a
+/// concrete ceiling. When a session would exceed this, the handler
+/// returns `413 Payload Too Large` with `BLOB_UPLOAD_INVALID` and the
+/// session buffer is dropped.
+///
+/// Follow-up (tracked for the CHANGELOG): the current in-memory session
+/// store keeps the whole upload in RAM. Spooling large uploads to disk
+/// and expiring idle sessions are larger refactors; the size cap here is
+/// the immediate closure of the unbounded-growth `DoS`.
+pub const MAX_UPLOAD_SESSION_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
 /// State of an in-flight blob upload.
 ///
 /// Stored per upload UUID. Chunk bytes are accumulated in `buffer`

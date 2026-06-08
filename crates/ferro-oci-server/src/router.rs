@@ -9,13 +9,31 @@
 //! can mount under `/`.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::routing::{delete, get, post};
 
 use crate::handlers::{base, catalog};
 use crate::registry::RegistryMeta;
 use ferro_blob_store::SharedBlobStore;
+
+/// Maximum request body size (bytes) accepted on the `/v2/**` surface.
+///
+/// Axum's [`DefaultBodyLimit`] defaults to 2 MiB, which silently rejects
+/// the manifest and blob-chunk pushes real clients send: the OCI
+/// Distribution Spec expects registries to accept manifests of at least
+/// 4 MiB, and individual blob chunks are routinely larger. We raise the
+/// limit to 512 MiB — comfortably above any manifest and large enough
+/// for a generous single blob chunk, while still bounding the bytes a
+/// single request can buffer. Total per-session upload growth is
+/// separately bounded by [`crate::upload::MAX_UPLOAD_SESSION_BYTES`].
+///
+/// The OCI surface routes every method through one `/v2/{*rest}`
+/// wildcard, so a single body limit covers manifests and blobs alike;
+/// the value is chosen to satisfy the larger (blob) case.
+pub const MAX_BODY_BYTES: usize = 512 * 1024 * 1024;
 
 /// Shared HTTP handler state.
 pub struct AppState {
@@ -23,6 +41,27 @@ pub struct AppState {
     pub blob_store: SharedBlobStore,
     /// Metadata plane (manifests, tags, upload sessions, referrers).
     pub registry: Arc<dyn RegistryMeta>,
+    /// Best-effort count of distinct blobs this server has written.
+    ///
+    /// Maintained incrementally by the blob handlers (`+1` on a
+    /// successful blob `put`, `-1` on a successful `delete`) so the
+    /// `/metrics` scrape can report `ferrooci_storage_blobs` in O(1)
+    /// instead of an O(number-of-blobs) `BlobStore::list()` filesystem
+    /// scan on every request — an open `/metrics` endpoint would
+    /// otherwise become a cheap amplification vector.
+    ///
+    /// It is a best-effort gauge: it counts blob writes/deletes observed
+    /// through *this* process and does not deduplicate a re-`put` of an
+    /// already-present digest, nor does it reflect blobs written by other
+    /// processes against a shared filesystem store. The honest claim is
+    /// "blobs written via this server instance".
+    blob_count: Arc<AtomicI64>,
+    /// Maximum total bytes a single in-flight upload session may buffer
+    /// before the server refuses further chunks (memory-exhaustion `DoS`
+    /// bound). Defaults to [`crate::upload::MAX_UPLOAD_SESSION_BYTES`];
+    /// overridable via [`AppState::with_max_upload_session_bytes`] (used
+    /// by tests to exercise the cap without allocating gigabytes).
+    max_upload_session_bytes: u64,
 }
 
 impl AppState {
@@ -46,7 +85,69 @@ impl AppState {
         Arc::new(Self {
             blob_store,
             registry,
+            blob_count: Arc::new(AtomicI64::new(0)),
+            max_upload_session_bytes: crate::upload::MAX_UPLOAD_SESSION_BYTES,
         })
+    }
+
+    /// Build state with a custom upload-session size cap.
+    ///
+    /// Behaves like [`AppState::new`] but overrides the per-session byte
+    /// cap (the memory-exhaustion `DoS` bound). Production callers use the
+    /// default via [`AppState::new`]; this exists so tests can drive the
+    /// cap-exceeded path with a handful of bytes instead of gigabytes.
+    #[must_use]
+    pub fn with_max_upload_session_bytes(
+        blob_store: SharedBlobStore,
+        registry: Arc<dyn RegistryMeta>,
+        max_upload_session_bytes: u64,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            blob_store,
+            registry,
+            blob_count: Arc::new(AtomicI64::new(0)),
+            max_upload_session_bytes,
+        })
+    }
+
+    /// The per-session upload byte cap currently in force.
+    #[must_use]
+    pub const fn max_upload_session_bytes(&self) -> u64 {
+        self.max_upload_session_bytes
+    }
+
+    /// Shared handle to the incremental blob counter.
+    ///
+    /// Cloned into the metrics layer so `/metrics` can report
+    /// `ferrooci_storage_blobs` without a filesystem scan. See the
+    /// [`blob_count`](AppState::blob_count) field docs for the exact
+    /// semantics.
+    #[must_use]
+    pub fn blob_count_handle(&self) -> Arc<AtomicI64> {
+        Arc::clone(&self.blob_count)
+    }
+
+    /// Record that one blob was written via this server.
+    pub fn inc_blob_count(&self) {
+        self.blob_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record that one blob was deleted via this server, saturating at 0.
+    pub fn dec_blob_count(&self) {
+        // Saturate at zero: a delete of a blob this process never counted
+        // (e.g. a pre-existing blob in a shared FS store) must not drive
+        // the gauge negative.
+        let _ = self.blob_count.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |n| Some(n.saturating_sub(1).max(0)),
+        );
+    }
+
+    /// Current best-effort blob count.
+    #[must_use]
+    pub fn blob_count(&self) -> i64 {
+        self.blob_count.load(Ordering::Relaxed)
     }
 }
 
@@ -73,6 +174,10 @@ pub fn router(state: Arc<AppState>) -> Router {
                 .patch(dispatch::dispatch_patch_inner)
                 .put(dispatch::dispatch_put_inner),
         )
+        // Raise the body limit above Axum's 2 MiB default so manifest
+        // (≥4 MiB per spec) and blob-chunk pushes are accepted. See
+        // [`MAX_BODY_BYTES`].
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(state)
 }
 

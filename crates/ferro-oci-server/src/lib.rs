@@ -85,7 +85,8 @@ pub use reference::{MAX_NAME_LENGTH, MAX_TAG_LENGTH, Reference, validate_name};
 pub use registry::{InMemoryRegistryMeta, ReferrerDescriptor, RegistryMeta};
 pub use router::{AppState, probe_routes, router};
 pub use serve::{Config, build_app, init_tracing, serve};
-pub use upload::{ContentRange, UploadState};
+pub use router::MAX_BODY_BYTES;
+pub use upload::{ContentRange, MAX_UPLOAD_SESSION_BYTES, UploadState};
 
 /// Crate name, exposed for diagnostics and `/metrics` labelling.
 pub const CRATE_NAME: &str = "ferro-oci-server";
