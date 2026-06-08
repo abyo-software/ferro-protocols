@@ -62,6 +62,20 @@ pub struct AppState {
     /// overridable via [`AppState::with_max_upload_session_bytes`] (used
     /// by tests to exercise the cap without allocating gigabytes).
     max_upload_session_bytes: u64,
+    /// Serialises the `contains` → `put` → gauge-increment critical
+    /// section for blob writes (R3-3).
+    ///
+    /// The `storage_blobs` gauge must reflect *distinct* blobs, so it is
+    /// only incremented when a digest is genuinely new. The naive
+    /// "check `contains`, then `put`, then `inc` if it was absent" sequence
+    /// races: two concurrent uploads of the *same* digest can both observe
+    /// it absent and both increment, drifting the gauge above the true
+    /// count. Holding this mutex across the whole check+put+inc region
+    /// (without touching `ferro-blob-store`) means only the first inserter
+    /// of a given digest increments. It is a single accounting mutex rather
+    /// than a per-digest map: blob writes are not the hot path, and a flat
+    /// mutex keeps the invariant obviously correct.
+    blob_accounting: tokio::sync::Mutex<()>,
 }
 
 impl AppState {
@@ -87,6 +101,7 @@ impl AppState {
             registry,
             blob_count: Arc::new(AtomicI64::new(0)),
             max_upload_session_bytes: crate::upload::MAX_UPLOAD_SESSION_BYTES,
+            blob_accounting: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -107,6 +122,7 @@ impl AppState {
             registry,
             blob_count: Arc::new(AtomicI64::new(0)),
             max_upload_session_bytes,
+            blob_accounting: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -130,6 +146,35 @@ impl AppState {
     /// Record that one blob was written via this server.
     pub fn inc_blob_count(&self) {
         self.blob_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Put `body` under `digest`, incrementing the distinct-blobs gauge
+    /// exactly once for a genuinely new digest (R3-3).
+    ///
+    /// The `contains` → `put` → `inc` sequence is held under the
+    /// [`blob_accounting`](AppState::blob_accounting) mutex so two
+    /// concurrent uploads of the *same* digest cannot both observe it
+    /// absent and both increment the gauge (which would drift it above the
+    /// true count). Only the first inserter increments. The blob store
+    /// itself is content-addressed and idempotent on a duplicate `put`, so
+    /// serialising here changes only the gauge accounting, not blob bytes.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any [`ferro_blob_store::BlobStoreError`] from the
+    /// underlying `contains` / `put`.
+    pub async fn store_blob_counted(
+        &self,
+        digest: &ferro_blob_store::Digest,
+        body: axum::body::Bytes,
+    ) -> ferro_blob_store::Result<()> {
+        let _accounting = self.blob_accounting.lock().await;
+        let already_present = self.blob_store.contains(digest).await.unwrap_or(false);
+        self.blob_store.put(digest, body).await?;
+        if !already_present {
+            self.inc_blob_count();
+        }
+        Ok(())
     }
 
     /// Record that one blob was deleted via this server, saturating at 0.
@@ -190,6 +235,62 @@ mod app_state_tests {
         let st = state();
         st.dec_blob_count();
         assert_eq!(st.blob_count(), 0, "decrement on empty stays at 0");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn r3_3_concurrent_same_digest_put_increments_gauge_once() {
+        // R3-3: two concurrent uploads of the SAME digest must increment
+        // the distinct-blobs gauge exactly once. `store_blob_counted`
+        // serialises the contains→put→inc region under an accounting mutex
+        // so only the first inserter counts; without it both could observe
+        // the digest absent and both increment (gauge == 2 = drift).
+        use bytes::Bytes;
+        use ferro_blob_store::Digest;
+
+        let st = state();
+        let body = Bytes::from_static(b"the-same-blob-bytes");
+        let digest = Digest::sha256_of(&body);
+
+        // Spawn many concurrent puts of the identical digest to widen the
+        // race window the old non-atomic code would have lost on.
+        let mut handles = Vec::new();
+        for _ in 0..16 {
+            let st = Arc::clone(&st);
+            let digest = digest.clone();
+            let body = body.clone();
+            handles.push(tokio::spawn(async move {
+                st.store_blob_counted(&digest, body).await.expect("put");
+            }));
+        }
+        for h in handles {
+            h.await.expect("join");
+        }
+
+        assert_eq!(
+            st.blob_count(),
+            1,
+            "concurrent puts of one digest must count it exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn r3_3_distinct_digests_each_counted_once() {
+        // Sanity: distinct digests each increment exactly once (the lock
+        // serialises but does not over-deduplicate genuinely new blobs).
+        use bytes::Bytes;
+        use ferro_blob_store::Digest;
+
+        let st = state();
+        for i in 0..5u8 {
+            let body = Bytes::from(vec![i; 4]);
+            let digest = Digest::sha256_of(&body);
+            st.store_blob_counted(&digest, body).await.expect("put");
+            // A duplicate put of the same digest must not double-count.
+            let body2 = Bytes::from(vec![i; 4]);
+            let digest2 = Digest::sha256_of(&body2);
+            st.store_blob_counted(&digest2, body2).await.expect("put2");
+        }
+        assert_eq!(st.blob_count(), 5, "five distinct blobs counted once each");
     }
 }
 
