@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 [package]
 name = "ferro-lumberjack"
-version = "0.2.0"
+version = "1.0.0"
 description = "Logstash Lumberjack v2 (Beats) protocol primitives: frame codec, async client, async server, TLS via rustls. Extracted from the Ferro ecosystem."
 categories = ["network-programming", "encoding"]
 keywords = ["lumberjack", "beats", "logstash", "protocol", "elastic"]
