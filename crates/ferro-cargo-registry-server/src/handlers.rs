@@ -29,10 +29,10 @@ pub async fn handle_config_json(State(state): State<CargoState>) -> Response {
 
 /// `GET /index/{*path}` — sparse-index line files.
 ///
-/// DD R2 F-R2-021: honours `If-None-Match` by computing a strong ETag
+/// DD R2 F-R2-021: honours `If-None-Match` by computing a strong `ETag`
 /// equal to the quoted SHA-256 of the rendered index body. When the
 /// request carries a matching `If-None-Match` header the handler returns
-/// `304 Not Modified` with the ETag but no body, which is what Cargo's
+/// `304 Not Modified` with the `ETag` but no body, which is what Cargo's
 /// sparse-index client expects for bandwidth-efficient polling.
 pub async fn handle_sparse_index(
     State(state): State<CargoState>,
@@ -41,11 +41,51 @@ pub async fn handle_sparse_index(
 ) -> Result<Response, CargoError> {
     let name =
         extract_name_from_index_path(&path).ok_or_else(|| CargoError::NotFound(path.clone()))?;
+    serve_index(&state, name, &headers).await
+}
+
+/// Root-level sparse-index handler for the two-segment layout.
+///
+/// Cargo configured with `index = "sparse+http://host/"` (the index
+/// base equal to the server root) fetches line files at the bare
+/// canonical layout — `1/{name}` and `2/{name}` for short names —
+/// without an `/index/` prefix. This handler serves those
+/// root-relative paths so a stock `cargo publish` / `cargo fetch`
+/// round-trip works without rewriting the index URL. The trailing
+/// path segment is the canonical crate name.
+pub async fn handle_sparse_index_root2(
+    State(state): State<CargoState>,
+    AxumPath((_prefix, name)): AxumPath<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Response, CargoError> {
+    serve_index(&state, &name, &headers).await
+}
+
+/// Root-level sparse-index handler for the three-segment layout.
+///
+/// Serves `3/{c}/{name}` and `{ab}/{cd}/{name}` shapes (names of three
+/// or more characters) when the index base is the server root. See
+/// [`handle_sparse_index_root2`] for the two-segment counterpart.
+pub async fn handle_sparse_index_root3(
+    State(state): State<CargoState>,
+    AxumPath((_p0, _p1, name)): AxumPath<(String, String, String)>,
+    headers: HeaderMap,
+) -> Result<Response, CargoError> {
+    serve_index(&state, &name, &headers).await
+}
+
+/// Shared body for the prefixed and root sparse-index handlers.
+async fn serve_index(
+    state: &CargoState,
+    name: &str,
+    headers: &HeaderMap,
+) -> Result<Response, CargoError> {
     let crates = state.crates.read().await;
     let record = crates
         .get(name)
         .ok_or_else(|| CargoError::NotFound(name.to_owned()))?;
     let body = render_lines(&record.entries);
+    drop(crates);
     let etag = sparse_index_etag(&body);
     let if_none_match = headers
         .get(header::IF_NONE_MATCH)
@@ -65,7 +105,7 @@ pub async fn handle_sparse_index(
     Ok((StatusCode::OK, h, body).into_response())
 }
 
-/// Compute the sparse-index ETag for `body`.
+/// Compute the sparse-index `ETag` for `body`.
 ///
 /// Returned as a quoted hex string (strong validator per RFC 9110
 /// §8.8.3).
@@ -77,7 +117,7 @@ pub fn sparse_index_etag(body: &str) -> String {
     format!("\"{}\"", hex::encode(digest))
 }
 
-/// Compare an `If-None-Match` header value against the computed ETag.
+/// Compare an `If-None-Match` header value against the computed `ETag`.
 ///
 /// Accepts:
 /// - Exact match of the quoted value.
@@ -183,6 +223,7 @@ pub async fn handle_publish(
     } else {
         record.entries.push(entry);
     }
+    drop(crates);
 
     debug!(crate_name = %name, version = %vers, "publish complete");
     Ok((
@@ -213,6 +254,7 @@ pub async fn handle_download(
         .get(&version)
         .ok_or_else(|| CargoError::NotFound(format!("{name} {version}")))?
         .clone();
+    drop(crates);
     let bytes = state.blobs.get(&digest).await?;
     let mut h = HeaderMap::new();
     h.insert(
@@ -263,6 +305,7 @@ async fn set_yanked(
         .find(|e| e.vers == version)
         .ok_or_else(|| CargoError::NotFound(format!("{name} {version}")))?;
     entry.yanked = yanked;
+    drop(crates);
     Ok(())
 }
 
@@ -276,13 +319,9 @@ pub async fn handle_owners_list(
     let record = crates
         .get(&name)
         .ok_or_else(|| CargoError::NotFound(name.clone()))?;
-    Ok((
-        StatusCode::OK,
-        Json(OwnersResponse {
-            users: record.owners.clone(),
-        }),
-    )
-        .into_response())
+    let users = record.owners.clone();
+    drop(crates);
+    Ok((StatusCode::OK, Json(OwnersResponse { users })).into_response())
 }
 
 /// `PUT /api/v1/crates/{name}/owners` — add owners.
@@ -349,6 +388,7 @@ async fn mutate_owners(
             next_id += 1;
         }
     }
+    drop(crates);
     Ok(())
 }
 

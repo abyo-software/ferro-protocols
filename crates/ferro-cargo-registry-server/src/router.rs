@@ -31,8 +31,8 @@ use tokio::sync::RwLock;
 use crate::config::IndexConfig;
 use crate::handlers::{
     handle_config_json, handle_download, handle_git_index_stub, handle_owners_add,
-    handle_owners_delete, handle_owners_list, handle_publish, handle_sparse_index, handle_unyank,
-    handle_yank,
+    handle_owners_delete, handle_owners_list, handle_publish, handle_sparse_index,
+    handle_sparse_index_root2, handle_sparse_index_root3, handle_unyank, handle_yank,
 };
 use crate::index::IndexEntry;
 use crate::owners::Owner;
@@ -90,5 +90,10 @@ pub fn router(state: CargoState) -> Router {
                 .put(handle_owners_add)
                 .delete(handle_owners_delete),
         )
+        // Root-relative sparse-index layout for `index = "sparse+http://host/"`.
+        // Static `api`/`index`/`config.json` segments are matched first by
+        // axum, so these only catch the canonical `{prefix}/{name}` shapes.
+        .route("/{prefix}/{name}", get(handle_sparse_index_root2))
+        .route("/{p0}/{p1}/{name}", get(handle_sparse_index_root3))
         .with_state(state)
 }

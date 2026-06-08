@@ -5,7 +5,7 @@
 //! `doc.rust-lang.org/cargo/reference/registries.html#index-configuration`.
 //!
 //! Cargo fetches `config.json` at the root of the index and uses it to
-//! discover the download and API URLs. FerroRepo serves the following
+//! discover the download and API URLs. `FerroRepo` serves the following
 //! fields:
 //!
 //! ```json
@@ -32,12 +32,23 @@ pub struct IndexConfig {
 }
 
 impl IndexConfig {
-    /// Build the default Phase 1 configuration pinned to `api_host`.
+    /// Build the default configuration pinned to `api_host`.
+    ///
+    /// The `dl` download template is rendered as an absolute URL rooted
+    /// at `api_host`. Cargo requires `dl` to resolve to a fetchable URL;
+    /// when `api_host` is a real origin (for example
+    /// `http://127.0.0.1:8081`) the resulting template
+    /// `http://127.0.0.1:8081/api/v1/crates/{crate}/{version}/download`
+    /// is what a stock `cargo fetch` downloads from. If `api_host` is
+    /// empty the template degrades to the bare server-relative path.
     #[must_use]
     pub fn new(api_host: impl Into<String>) -> Self {
+        let api = api_host.into();
+        let base = api.trim_end_matches('/');
+        let dl = format!("{base}/api/v1/crates/{{crate}}/{{version}}/download");
         Self {
-            dl: "/api/v1/crates/{crate}/{version}/download".to_owned(),
-            api: api_host.into(),
+            dl,
+            api,
             auth_required: false,
         }
     }
