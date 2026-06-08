@@ -15,6 +15,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -24,6 +25,38 @@ use serde::{Deserialize, Serialize};
 
 use crate::reference::Reference;
 use crate::upload::UploadState;
+
+/// Default ceiling on the number of in-flight upload sessions a single
+/// registry process will hold open at once (R2-7).
+///
+/// `F2` bounded the bytes of *one* session, but an unauthenticated client
+/// could still open an unbounded *number* of sessions (or many near-cap
+/// sessions) and exhaust process memory. We cap concurrent sessions and
+/// evict idle ones to close that vector. 1024 is generous for honest
+/// multi-client pushing while bounding the worst case; override via
+/// [`InMemoryRegistryMeta::with_session_limits`].
+pub const DEFAULT_MAX_UPLOAD_SESSIONS: usize = 1024;
+
+/// Default idle eviction window for an in-flight upload session (R2-7).
+///
+/// Sessions with no `PATCH`/`PUT` activity for this long are swept lazily
+/// when a new upload is started or the session is next accessed. One hour
+/// matches common registry defaults.
+pub const DEFAULT_UPLOAD_SESSION_TTL: Duration = Duration::from_secs(60 * 60);
+
+/// Outcome of trying to admit a new upload session.
+///
+/// Returned by [`RegistryMeta::start_upload`] so the handler can map a
+/// capacity rejection onto `429 Too Many Requests` rather than a generic
+/// error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UploadAdmission {
+    /// A session was created; carries its UUID.
+    Started(String),
+    /// The concurrent-session cap is reached; the client should retry
+    /// later. Carries the cap for the diagnostic message.
+    AtCapacity(usize),
+}
 
 /// Descriptor returned by the referrers API.
 ///
@@ -93,8 +126,15 @@ pub trait RegistryMeta: Send + Sync {
     /// List repositories (catalog endpoint).
     async fn list_repositories(&self, last: Option<&str>, n: Option<usize>) -> Result<Vec<String>>;
 
-    /// Allocate a new upload UUID for `name`.
-    async fn start_upload(&self, name: &str) -> Result<String>;
+    /// Allocate a new upload UUID for `name`, subject to the concurrent
+    /// session cap and idle-session TTL (R2-7).
+    ///
+    /// Implementations SHOULD first evict any sessions idle past their TTL
+    /// (a lazy sweep), then admit the new session only if the live count
+    /// is below the cap. The returned [`UploadAdmission`] distinguishes a
+    /// fresh UUID from a capacity rejection so the handler can answer
+    /// `429 Too Many Requests`.
+    async fn start_upload(&self, name: &str) -> Result<UploadAdmission>;
 
     /// Append `chunk` to the upload and return the new byte offset.
     async fn append_upload(&self, name: &str, uuid: &str, offset: u64, chunk: Bytes)
@@ -135,10 +175,29 @@ pub trait RegistryMeta: Send + Sync {
     ) -> Result<()>;
 }
 
+/// Tunable caps on in-flight upload sessions (R2-7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionLimits {
+    /// Maximum number of concurrent in-flight upload sessions.
+    pub max_sessions: usize,
+    /// Idle duration after which a session is evicted on the next sweep.
+    pub idle_ttl: Duration,
+}
+
+impl Default for SessionLimits {
+    fn default() -> Self {
+        Self {
+            max_sessions: DEFAULT_MAX_UPLOAD_SESSIONS,
+            idle_ttl: DEFAULT_UPLOAD_SESSION_TTL,
+        }
+    }
+}
+
 /// In-memory `RegistryMeta` impl for tests and single-node deployments.
 #[derive(Default)]
 pub struct InMemoryRegistryMeta {
     inner: RwLock<InMemoryState>,
+    limits: SessionLimits,
 }
 
 #[derive(Default)]
@@ -154,16 +213,46 @@ struct InMemoryState {
 }
 
 impl InMemoryRegistryMeta {
-    /// Construct a fresh empty registry.
+    /// Construct a fresh empty registry with default session limits.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Construct a registry with custom upload-session limits (R2-7).
+    ///
+    /// Used by tests to exercise the concurrent-session cap and idle TTL
+    /// without opening a thousand sessions or sleeping for an hour.
+    #[must_use]
+    pub fn with_session_limits(limits: SessionLimits) -> Self {
+        Self {
+            inner: RwLock::default(),
+            limits,
+        }
+    }
+
+    /// The upload-session limits in force.
+    #[must_use]
+    pub const fn session_limits(&self) -> SessionLimits {
+        self.limits
     }
 
     /// Wrap in an `Arc<dyn RegistryMeta>` for [`crate::router::AppState`].
     #[must_use]
     pub fn shared() -> Arc<dyn RegistryMeta> {
         Arc::new(Self::new())
+    }
+}
+
+impl InMemoryState {
+    /// Evict every upload session idle for at least `ttl` relative to
+    /// `now`. Returns the number of sessions swept. Caller holds the
+    /// write lock.
+    fn sweep_idle_uploads(&mut self, now: Instant, ttl: Duration) -> usize {
+        let before = self.uploads.len();
+        self.uploads
+            .retain(|_, state| !state.is_idle_for(now, ttl));
+        before - self.uploads.len()
     }
 }
 
@@ -275,15 +364,24 @@ impl RegistryMeta for InMemoryRegistryMeta {
         Ok(names)
     }
 
-    async fn start_upload(&self, name: &str) -> Result<String> {
+    async fn start_upload(&self, name: &str) -> Result<UploadAdmission> {
         let uuid = uuid::Uuid::new_v4().to_string();
+        let now = Instant::now();
         let mut guard = self.inner.write();
+        // R2-7: lazily evict idle sessions before admitting a new one so a
+        // burst of abandoned sessions cannot pin memory forever, then
+        // enforce the concurrent-session cap.
+        guard.sweep_idle_uploads(now, self.limits.idle_ttl);
+        if guard.uploads.len() >= self.limits.max_sessions {
+            drop(guard);
+            return Ok(UploadAdmission::AtCapacity(self.limits.max_sessions));
+        }
         guard.uploads.insert(
             (name.to_owned(), uuid.clone()),
             UploadState::new(name, uuid.clone()),
         );
         drop(guard);
-        Ok(uuid)
+        Ok(UploadAdmission::Started(uuid))
     }
 
     async fn append_upload(
@@ -322,9 +420,25 @@ impl RegistryMeta for InMemoryRegistryMeta {
     }
 
     async fn get_upload_state(&self, name: &str, uuid: &str) -> Result<Option<UploadState>> {
-        let guard = self.inner.read();
+        // R2-7: evict the session on access if it has gone idle past the
+        // TTL so a stale `GET`/`PATCH`/`PUT` against it sees "unknown
+        // upload" (the handler answers 404 BLOB_UPLOAD_UNKNOWN) rather
+        // than resurrecting an expired session.
+        let now = Instant::now();
         let key = (name.to_owned(), uuid.to_owned());
-        Ok(guard.uploads.get(&key).cloned())
+        let mut guard = self.inner.write();
+        if let Some(state) = guard.uploads.get(&key) {
+            if state.is_idle_for(now, self.limits.idle_ttl) {
+                guard.uploads.remove(&key);
+                drop(guard);
+                return Ok(None);
+            }
+            let cloned = state.clone();
+            drop(guard);
+            return Ok(Some(cloned));
+        }
+        drop(guard);
+        Ok(None)
     }
 
     async fn cancel_upload(&self, name: &str, uuid: &str) -> Result<bool> {
@@ -386,16 +500,27 @@ impl RegistryMeta for InMemoryRegistryMeta {
 
 #[cfg(test)]
 mod tests {
-    use super::{InMemoryRegistryMeta, ReferrerDescriptor, RegistryMeta};
+    use super::{
+        InMemoryRegistryMeta, ReferrerDescriptor, RegistryMeta, SessionLimits, UploadAdmission,
+    };
     use crate::reference::Reference;
     use crate::upload::UploadState;
     use bytes::Bytes;
     use ferro_blob_store::Digest;
+    use std::time::Duration;
+
+    /// Unwrap a [`UploadAdmission::Started`] UUID; panic on capacity.
+    fn started(adm: UploadAdmission) -> String {
+        match adm {
+            UploadAdmission::Started(u) => u,
+            UploadAdmission::AtCapacity(c) => panic!("unexpected capacity rejection at {c}"),
+        }
+    }
 
     #[tokio::test]
     async fn start_append_take_cycle() {
         let reg = InMemoryRegistryMeta::new();
-        let uuid = reg.start_upload("lib/alpine").await.expect("start");
+        let uuid = started(reg.start_upload("lib/alpine").await.expect("start"));
         let new_off = reg
             .append_upload("lib/alpine", &uuid, 0, Bytes::from_static(b"hello"))
             .await
@@ -418,7 +543,7 @@ mod tests {
     #[tokio::test]
     async fn out_of_order_chunk_is_rejected() {
         let reg = InMemoryRegistryMeta::new();
-        let uuid = reg.start_upload("lib/alpine").await.expect("start");
+        let uuid = started(reg.start_upload("lib/alpine").await.expect("start"));
         reg.append_upload("lib/alpine", &uuid, 0, Bytes::from_static(b"ab"))
             .await
             .expect("first chunk");
@@ -518,5 +643,62 @@ mod tests {
             .await
             .expect("list sboms");
         assert_eq!(sboms.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn start_upload_enforces_concurrent_session_cap() {
+        // R2-7: cap at 2 concurrent sessions. The third POST is rejected
+        // with AtCapacity rather than pinning unbounded memory.
+        let reg = InMemoryRegistryMeta::with_session_limits(SessionLimits {
+            max_sessions: 2,
+            idle_ttl: Duration::from_secs(3600),
+        });
+        let _a = started(reg.start_upload("repo").await.expect("first"));
+        let _b = started(reg.start_upload("repo").await.expect("second"));
+        let third = reg.start_upload("repo").await.expect("third call ok");
+        assert_eq!(
+            third,
+            UploadAdmission::AtCapacity(2),
+            "third session over the cap must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn idle_sessions_are_swept_on_new_upload_freeing_capacity() {
+        // Cap at 1 with a zero TTL so any pre-existing session is
+        // immediately idle and swept when the next upload is started —
+        // capacity is reclaimed rather than wedged forever.
+        let reg = InMemoryRegistryMeta::with_session_limits(SessionLimits {
+            max_sessions: 1,
+            idle_ttl: Duration::from_secs(0),
+        });
+        let first = started(reg.start_upload("repo").await.expect("first"));
+        // With ttl=0 the first session is already idle; starting a new
+        // upload sweeps it, so we are admitted instead of AtCapacity.
+        let second = reg.start_upload("repo").await.expect("second call ok");
+        assert!(
+            matches!(second, UploadAdmission::Started(_)),
+            "idle session should be swept to free capacity, got {second:?}"
+        );
+        // The original (swept) session is gone.
+        let gone = reg
+            .get_upload_state("repo", &first)
+            .await
+            .expect("get state");
+        assert!(gone.is_none(), "swept session must no longer resolve");
+    }
+
+    #[tokio::test]
+    async fn expired_session_is_evicted_on_access() {
+        // R2-7: a session idle past its TTL is evicted on access so the
+        // handler answers "unknown upload" (→ 404) for it.
+        let reg = InMemoryRegistryMeta::with_session_limits(SessionLimits {
+            max_sessions: 16,
+            idle_ttl: Duration::from_secs(0),
+        });
+        let uuid = started(reg.start_upload("repo").await.expect("start"));
+        // ttl=0 → already expired on the next access.
+        let state = reg.get_upload_state("repo", &uuid).await.expect("get");
+        assert!(state.is_none(), "expired session must be evicted on access");
     }
 }

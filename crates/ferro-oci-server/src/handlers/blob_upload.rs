@@ -24,6 +24,7 @@ use ferro_blob_store::Digest;
 
 use crate::error::{OciError, OciErrorCode};
 use crate::reference::validate_name;
+use crate::registry::UploadAdmission;
 use crate::router::AppState;
 use crate::upload::ContentRange;
 
@@ -139,9 +140,21 @@ pub async fn init_upload(
         return blob_created_response(name, &digest);
     }
 
-    // Start-session branch.
+    // Start-session branch. R2-7: the registry enforces a concurrent
+    // upload-session cap (after evicting idle sessions); a capacity
+    // rejection maps to 429 Too Many Requests so an unauthenticated client
+    // cannot pin memory by opening unbounded sessions.
     let uuid = match state.registry.start_upload(name).await {
-        Ok(u) => u,
+        Ok(UploadAdmission::Started(u)) => u,
+        Ok(UploadAdmission::AtCapacity(cap)) => {
+            return OciError::new(
+                OciErrorCode::TooManyRequests,
+                format!(
+                    "upload-session capacity reached ({cap} concurrent sessions); retry later"
+                ),
+            )
+            .into_response();
+        }
         Err(e) => return OciError::from(e).into_response(),
     };
     let headers = upload_location_headers(name, &uuid, 0);

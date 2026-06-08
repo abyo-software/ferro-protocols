@@ -17,6 +17,8 @@
 //! delegated to the `RegistryMeta` trait — the in-memory impl is
 //! provided in [`crate::registry`].
 
+use std::time::Instant;
+
 use bytes::{Bytes, BytesMut};
 
 /// Maximum number of bytes a single in-flight upload session may
@@ -51,6 +53,10 @@ pub struct UploadState {
     pub uuid: String,
     /// Accumulated bytes.
     pub buffer: BytesMut,
+    /// Wall-clock instant of the last activity on this session (creation
+    /// or the most recent appended chunk). Used by the registry to evict
+    /// idle sessions after a TTL (R2-7).
+    pub last_activity: Instant,
 }
 
 impl UploadState {
@@ -61,6 +67,7 @@ impl UploadState {
             name: name.into(),
             uuid: uuid.into(),
             buffer: BytesMut::new(),
+            last_activity: Instant::now(),
         }
     }
 
@@ -70,10 +77,20 @@ impl UploadState {
         self.buffer.len() as u64
     }
 
-    /// Append a chunk, returning the new offset.
+    /// Append a chunk, returning the new offset. Refreshes the
+    /// last-activity timestamp so an actively-progressing upload is not
+    /// swept by the idle-session TTL.
     pub fn append(&mut self, chunk: &Bytes) -> u64 {
         self.buffer.extend_from_slice(chunk);
+        self.last_activity = Instant::now();
         self.offset()
+    }
+
+    /// True when this session has been idle (no creation/append activity)
+    /// for at least `ttl` measured against `now`.
+    #[must_use]
+    pub fn is_idle_for(&self, now: Instant, ttl: std::time::Duration) -> bool {
+        now.saturating_duration_since(self.last_activity) >= ttl
     }
 
     /// Take the accumulated bytes, leaving the buffer empty.

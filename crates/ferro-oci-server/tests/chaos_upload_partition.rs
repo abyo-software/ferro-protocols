@@ -15,12 +15,21 @@
 
 use bytes::Bytes;
 use ferro_blob_store::Digest;
-use ferro_oci_server::registry::{InMemoryRegistryMeta, RegistryMeta};
+use ferro_oci_server::registry::{InMemoryRegistryMeta, RegistryMeta, UploadAdmission};
+
+/// Start an upload and unwrap its UUID, panicking on a capacity rejection
+/// (the chaos tests never approach the concurrent-session cap).
+async fn start(reg: &InMemoryRegistryMeta, name: &str) -> String {
+    match reg.start_upload(name).await.expect("start upload") {
+        UploadAdmission::Started(uuid) => uuid,
+        UploadAdmission::AtCapacity(cap) => panic!("unexpected session cap at {cap}"),
+    }
+}
 
 #[tokio::test]
 async fn mid_upload_disconnect_then_resume_succeeds() {
     let reg = InMemoryRegistryMeta::new();
-    let uuid = reg.start_upload("lib/alpine").await.expect("start");
+    let uuid = start(&reg, "lib/alpine").await;
 
     // Client writes 3 chunks then "disconnects" (we just stop sending).
     reg.append_upload("lib/alpine", &uuid, 0, Bytes::from_static(b"aaa"))
@@ -69,7 +78,7 @@ async fn out_of_order_resume_is_rejected() {
     // to resume from the wrong offset after a partition, the registry
     // MUST reject the PATCH.
     let reg = InMemoryRegistryMeta::new();
-    let uuid = reg.start_upload("lib/alpine").await.expect("start");
+    let uuid = start(&reg, "lib/alpine").await;
     reg.append_upload("lib/alpine", &uuid, 0, Bytes::from_static(b"first"))
         .await
         .expect("first chunk");
@@ -94,7 +103,7 @@ async fn cancel_during_partition_is_idempotent() {
     // When the client chooses to abort rather than resume, DELETE on
     // the upload must succeed and the UUID must stop existing.
     let reg = InMemoryRegistryMeta::new();
-    let uuid = reg.start_upload("lib/alpine").await.expect("start");
+    let uuid = start(&reg, "lib/alpine").await;
     reg.append_upload("lib/alpine", &uuid, 0, Bytes::from_static(b"stuff"))
         .await
         .expect("chunk");

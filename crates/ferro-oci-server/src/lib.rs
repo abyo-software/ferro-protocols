@@ -82,7 +82,10 @@ pub use manifest::{Descriptor, ImageIndex, ImageManifest, empty_image_index};
 pub use media_types::{ManifestKind, classify_manifest_media_type};
 pub use metrics::{Metrics, MetricsState, instrument, metrics_routes};
 pub use reference::{MAX_NAME_LENGTH, MAX_TAG_LENGTH, Reference, validate_name};
-pub use registry::{InMemoryRegistryMeta, ReferrerDescriptor, RegistryMeta};
+pub use registry::{
+    DEFAULT_MAX_UPLOAD_SESSIONS, DEFAULT_UPLOAD_SESSION_TTL, InMemoryRegistryMeta,
+    ReferrerDescriptor, RegistryMeta, SessionLimits, UploadAdmission,
+};
 pub use router::{AppState, probe_routes, router};
 pub use serve::{Config, build_app, init_tracing, serve};
 pub use router::MAX_BODY_BYTES;

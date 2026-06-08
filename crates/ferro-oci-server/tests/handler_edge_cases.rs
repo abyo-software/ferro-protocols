@@ -791,6 +791,66 @@ async fn chunked_upload_past_session_cap_is_rejected_and_buffer_dropped() {
     );
 }
 
+// ---- R2-7: concurrent upload-session count cap + idle TTL ---------------
+
+#[tokio::test]
+async fn opening_more_sessions_than_cap_returns_429() {
+    use ferro_oci_server::SessionLimits;
+    // Cap concurrent sessions at 2 (TTL well above the test runtime so the
+    // sweep does not interfere).
+    let blob_store: SharedBlobStore = Arc::new(InMemoryBlobStore::new());
+    let registry = Arc::new(ferro_oci_server::InMemoryRegistryMeta::with_session_limits(
+        SessionLimits {
+            max_sessions: 2,
+            idle_ttl: std::time::Duration::from_secs(3600),
+        },
+    ));
+    let state = AppState::new(blob_store, registry);
+    let app = router(state).merge(probe_routes());
+
+    // First two POSTs succeed (202).
+    for _ in 0..2 {
+        let (status, _h, _b) =
+            send(&app, method(Method::POST, "/v2/repo/blobs/uploads/", Body::empty())).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "session under the cap");
+    }
+    // The third exceeds the cap → 429 Too Many Requests.
+    let (status, _h, body) =
+        send(&app, method(Method::POST, "/v2/repo/blobs/uploads/", Body::empty())).await;
+    assert_eq!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "session over the cap must be rejected with 429"
+    );
+    assert_error_code(&body, "TOOMANYREQUESTS");
+}
+
+#[tokio::test]
+async fn idle_session_is_evicted_and_reads_as_unknown() {
+    use ferro_oci_server::SessionLimits;
+    // Zero TTL: the session is idle the instant it is created, so the very
+    // next access evicts it and the handler answers 404 BLOB_UPLOAD_UNKNOWN.
+    let blob_store: SharedBlobStore = Arc::new(InMemoryBlobStore::new());
+    let registry = Arc::new(ferro_oci_server::InMemoryRegistryMeta::with_session_limits(
+        SessionLimits {
+            max_sessions: 16,
+            idle_ttl: std::time::Duration::from_secs(0),
+        },
+    ));
+    let state = AppState::new(blob_store, registry);
+    let app = router(state).merge(probe_routes());
+
+    let (status, headers, _b) =
+        send(&app, method(Method::POST, "/v2/repo/blobs/uploads/", Body::empty())).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let location = headers[header::LOCATION].to_str().unwrap().to_owned();
+
+    // The expired session no longer resolves.
+    let (status, _h, body) = send(&app, get(&location)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "expired session evicted");
+    assert_error_code(&body, "BLOB_UPLOAD_UNKNOWN");
+}
+
 // ---- F3: body limit raised above Axum's 2 MiB default -------------------
 
 #[tokio::test]
