@@ -13,6 +13,7 @@ jobs:
     runs-on: [self-hosted, Linux, X64, kvm]
     permissions:
       contents: write   # for creating the GitHub Release
+      id-token: write   # for cosign keyless (OIDC) signing
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -79,6 +80,40 @@ jobs:
           cd "crates/${{ steps.tag.outputs.crate }}"
           cargo publish
 
+      # Build the packaged .crate so we have a stable artifact to sign and to
+      # attach to the GitHub Release. `cargo package` produces the same
+      # tarball that `cargo publish` uploaded.
+      - name: Package crate artifact
+        id: pkg
+        if: ${{ !contains(steps.tag.outputs.version, '-') }}   # skip pre-release tags
+        run: |
+          set -euo pipefail
+          CRATE="${{ steps.tag.outputs.crate }}"
+          VERSION="${{ steps.tag.outputs.version }}"
+          (cd "crates/$CRATE" && cargo package --no-verify)
+          ARTIFACT="target/package/${CRATE}-${VERSION}.crate"
+          test -f "$ARTIFACT" || { echo "::error::packaged artifact $ARTIFACT not found"; exit 1; }
+          echo "artifact=$ARTIFACT" >> "$GITHUB_OUTPUT"
+
+      # Keyless (OIDC) Sigstore signing of the published .crate tarball.
+      # Produces <artifact>.sig (signature) and <artifact>.crt (cert) that are
+      # attached to the GitHub Release for supply-chain provenance.
+      - name: Install cosign
+        if: ${{ !contains(steps.tag.outputs.version, '-') }}
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign crate artifact (cosign keyless)
+        if: ${{ !contains(steps.tag.outputs.version, '-') }}
+        env:
+          COSIGN_YES: "true"   # non-interactive keyless flow
+        run: |
+          set -euo pipefail
+          ARTIFACT="${{ steps.pkg.outputs.artifact }}"
+          cosign sign-blob \
+            --output-signature "${ARTIFACT}.sig" \
+            --output-certificate "${ARTIFACT}.crt" \
+            "${ARTIFACT}"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -86,4 +121,15 @@ jobs:
           name: "${{ steps.tag.outputs.crate }} v${{ steps.tag.outputs.version }}"
           body: |
             See [`crates/${{ steps.tag.outputs.crate }}/CHANGELOG.md`](crates/${{ steps.tag.outputs.crate }}/CHANGELOG.md) for the entries in this release.
+
+            Supply-chain: the attached `.crate` tarball is signed with
+            cosign keyless (Sigstore). Verify with:
+            `cosign verify-blob --signature <crate>.sig --certificate <crate>.crt <crate>`
           generate_release_notes: false
+          # Attach the signed tarball + signature + cert (only for stable,
+          # non-pre-release tags where the package/sign steps ran).
+          files: |
+            target/package/${{ steps.tag.outputs.crate }}-${{ steps.tag.outputs.version }}.crate
+            target/package/${{ steps.tag.outputs.crate }}-${{ steps.tag.outputs.version }}.crate.sig
+            target/package/${{ steps.tag.outputs.crate }}-${{ steps.tag.outputs.version }}.crate.crt
+          fail_on_unmatched_files: false

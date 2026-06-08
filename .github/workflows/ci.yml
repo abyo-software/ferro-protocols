@@ -119,3 +119,50 @@ jobs:
           toolchain: 1.91.1
       - uses: Swatinem/rust-cache@v2
       - run: cargo doc --workspace --no-deps --all-features
+
+  beta:
+    # Early-warning signal for upcoming-stable regressions. This job runs
+    # clippy + test on the Rust *beta* channel so we learn about a beta
+    # regression weeks before it reaches stable. It is intentionally
+    # NON-GATING (`continue-on-error: true`): a transient beta-only break
+    # (e.g. a new lint or a nightly-derived behaviour change) must not block
+    # PRs, but the job still runs and surfaces in the checks list.
+    name: beta (non-gating)
+    runs-on: [self-hosted, Linux, X64, kvm]
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@beta
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo test --workspace --all-features
+
+  semver-checks:
+    # Gates SemVer compliance for the upcoming 0.x -> 1.0.0 GA: every
+    # published crate must not introduce an undeclared breaking change in
+    # its public API relative to the last release on crates.io.
+    # `cargo-semver-checks check-release` compares the working tree against
+    # the most recently published version of each crate and fails on a
+    # breaking change that isn't matched by a major (>=1.0.0) version bump.
+    # For pre-1.0 crates a breaking change is allowed with a minor bump, so
+    # this primarily acts as a TRIPWIRE while we are still on 0.x and becomes
+    # a hard gate once crates cross to 1.0.0. It is left gating (no
+    # continue-on-error) so an accidental breaking change is caught before
+    # the GA publish.
+    name: cargo-semver-checks (0.x -> 1.0 gate)
+    runs-on: [self-hosted, Linux, X64, kvm]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.91.1
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-semver-checks
+      # --workspace checks every member that is published (has a version on
+      # crates.io); members not yet published are skipped by the tool with a
+      # note rather than failing the job.
+      - run: cargo semver-checks check-release --workspace
