@@ -25,6 +25,28 @@ fn parse_reference(s: &str) -> Result<Reference, OciError> {
     s.parse::<Reference>()
 }
 
+/// Map a registry *mutation* failure onto an [`OciError`].
+///
+/// R3-2: a metadata mutation (manifest PUT / DELETE / referrer
+/// registration) that cannot be made durable surfaces as
+/// [`ferro_blob_store::BlobStoreError::Io`] from the registry. Such a
+/// failure must NOT be acknowledged as success — the registry has
+/// already rolled the in-memory change back, so we return `500 Internal
+/// Server Error` to tell the client the mutation was not stored. Other
+/// (non-durability) errors keep their usual mapping.
+fn map_mutation_error(err: ferro_blob_store::BlobStoreError) -> OciError {
+    use axum::http::StatusCode;
+    use ferro_blob_store::BlobStoreError as B;
+    if let B::Io(io) = &err {
+        return OciError::new(
+            OciErrorCode::Unsupported,
+            format!("registry metadata could not be persisted durably: {io}"),
+        )
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+    OciError::from(err)
+}
+
 fn manifest_response_headers(digest: &Digest, media_type: &str, size: usize) -> HeaderMap {
     let mut headers = HeaderMap::new();
     let digest_str = digest.to_string();
@@ -365,7 +387,10 @@ pub async fn put_manifest(
         .put_manifest(name, &reference, &digest, &content_type, body.clone())
         .await
     {
-        return OciError::from(e).into_response();
+        // R3-2: a persistence failure here means the manifest was rolled
+        // back in memory; surface 5xx rather than 201 so the client knows
+        // it was not durably stored.
+        return map_mutation_error(e).into_response();
     }
 
     if let Err(e) = register_referrer_if_any(state, name, &parsed, &digest, &content_type, body_len)
@@ -455,7 +480,7 @@ async fn register_referrer_if_any(
         .registry
         .register_referrer(name, &subj, descriptor)
         .await
-        .map_err(OciError::from)
+        .map_err(map_mutation_error)
 }
 
 /// Handle `DELETE /v2/{name}/manifests/{reference}`.
@@ -486,7 +511,9 @@ pub async fn delete_manifest(state: &AppState, name: &str, reference_str: &str) 
             format!("manifest {reference_str} not found in {name}"),
         )
         .into_response(),
-        Err(e) => OciError::from(e).into_response(),
+        // R3-2: a persistence failure means the delete was rolled back in
+        // memory; surface 5xx rather than 202.
+        Err(e) => map_mutation_error(e).into_response(),
     }
 }
 

@@ -326,11 +326,57 @@ impl InMemoryRegistryMeta {
         let mut manifests: BTreeMap<String, BTreeMap<String, (String, Bytes)>> = BTreeMap::new();
         for (name, by_digest) in snapshot.manifests {
             let mut inner = BTreeMap::new();
-            for (digest, pm) in by_digest {
-                let bytes = hex::decode(&pm.body_hex).map_err(|e| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidData, e)
-                })?;
-                inner.insert(digest, (pm.media_type, Bytes::from(bytes)));
+            for (digest_str, pm) in by_digest {
+                let bytes = match hex::decode(&pm.body_hex) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        // A non-decodable body is corrupt; drop the entry
+                        // rather than fail the whole boot, mirroring the
+                        // key-mismatch handling below.
+                        tracing::warn!(
+                            name = %name,
+                            digest = %digest_str,
+                            error = %e,
+                            "dropping persisted manifest with undecodable body_hex"
+                        );
+                        continue;
+                    }
+                };
+                let bytes = Bytes::from(bytes);
+                // R3-1: the map key is content-addressed — it MUST equal
+                // sha256(body). A corrupted or crafted metadata.json could
+                // otherwise advertise a digest `<D>` while serving bytes
+                // that hash to something else, bypassing the content-
+                // addressing invariant R2-1 enforces on PUT. Re-derive the
+                // digest over the exact bytes and drop any entry whose key
+                // does not match (only sha256 is canonical here).
+                let Ok(key_digest) = digest_str.parse::<Digest>() else {
+                    tracing::warn!(
+                        name = %name,
+                        digest = %digest_str,
+                        "dropping persisted manifest with unparseable digest key"
+                    );
+                    continue;
+                };
+                if key_digest.algo() != ferro_blob_store::DigestAlgo::Sha256 {
+                    tracing::warn!(
+                        name = %name,
+                        digest = %digest_str,
+                        "dropping persisted manifest keyed by a non-sha256 digest"
+                    );
+                    continue;
+                }
+                let recomputed = Digest::sha256_of(&bytes);
+                if recomputed.hex() != key_digest.hex() {
+                    tracing::warn!(
+                        name = %name,
+                        key = %digest_str,
+                        recomputed = %recomputed,
+                        "dropping corrupt persisted manifest: key digest != sha256(body)"
+                    );
+                    continue;
+                }
+                inner.insert(digest_str, (pm.media_type, bytes));
             }
             manifests.insert(name, inner);
         }
@@ -343,15 +389,24 @@ impl InMemoryRegistryMeta {
     }
 
     /// Snapshot the durable parts of `state` to the configured path, if
-    /// persistence is enabled. Best-effort: a write failure is logged but
-    /// does not fail the in-memory mutation (the hot path remains
-    /// authoritative; the next successful write re-syncs the mirror).
+    /// persistence is enabled.
+    ///
+    /// R3-2: this is NO LONGER best-effort. When persistence is configured
+    /// (filesystem deployment) a write failure (disk full, permission
+    /// error, …) is returned to the caller so the mutating trait methods
+    /// can roll back the in-memory change and surface an error to the
+    /// client — a manifest PUT that cannot be made durable must NOT be
+    /// acknowledged with 201, or it would silently vanish on restart.
+    ///
+    /// When persistence is disabled (`persist_path == None`, the in-memory
+    /// / test deployment) this is an infallible no-op, so that path is
+    /// unchanged.
     ///
     /// Caller holds the write lock so the mirror is consistent with the
     /// state it snapshots.
-    fn persist_locked(&self, state: &InMemoryState) {
+    fn persist_locked(&self, state: &InMemoryState) -> std::io::Result<()> {
         let Some(path) = &self.persist_path else {
-            return;
+            return Ok(());
         };
         let snapshot = MetadataSnapshot {
             manifests: state
@@ -376,27 +431,98 @@ impl InMemoryRegistryMeta {
             tags: state.tags.clone(),
             referrers: state.referrers.clone(),
         };
-        if let Err(e) = Self::write_snapshot_atomic(path, &snapshot) {
-            tracing::warn!(
+        Self::write_snapshot_atomic(path, &snapshot).inspect_err(|e| {
+            tracing::error!(
                 path = %path.display(),
                 error = %e,
-                "failed to persist registry metadata snapshot"
+                "failed to persist registry metadata snapshot; rolling back mutation"
             );
-        }
+        })
     }
 
-    /// Serialise `snapshot` and write it to `path` atomically via a
-    /// temp-file + rename so a crash mid-write never leaves a truncated
-    /// `metadata.json`.
+    /// Map a persistence failure onto a [`ferro_blob_store::BlobStoreError`]
+    /// so it propagates through the [`RegistryMeta`] trait's `Result`. The
+    /// handler layer treats this as a 5xx (durability could not be
+    /// guaranteed) rather than acknowledging the mutation.
+    const fn persist_error(e: std::io::Error) -> ferro_blob_store::BlobStoreError {
+        ferro_blob_store::BlobStoreError::Io(e)
+    }
+
+    /// Serialise `snapshot` and write it to `path` atomically and durably.
+    ///
+    /// R3-5: a fixed sibling temp path (`metadata.json.tmp`) plus a plain
+    /// `write` + `rename` with no `fsync` has two defects — it is not
+    /// crash-durable (the bytes may still be in the page cache when the
+    /// machine loses power, so a crash can resurrect a *stale* snapshot
+    /// after the rename "succeeded"), and an attacker who can write the
+    /// data dir could pre-place the temp path as a symlink and redirect
+    /// the write. We close both:
+    ///
+    /// 1. Create the temp file in the *same directory* with a unique name
+    ///    using `O_CREAT | O_EXCL` (`OpenOptions::create_new`), so a
+    ///    pre-existing file or symlink at that path makes the open *fail*
+    ///    rather than be followed.
+    /// 2. `write_all` then `sync_all()` (fsync) the temp file so its bytes
+    ///    are on stable storage before we expose them.
+    /// 3. `rename` over the target (atomic on POSIX), then fsync the parent
+    ///    directory so the rename itself is durable.
     fn write_snapshot_atomic(
         path: &std::path::Path,
         snapshot: &MetadataSnapshot,
     ) -> std::io::Result<()> {
+        use std::io::Write as _;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        // Monotonic counter feeding the unique temp name so concurrent /
+        // back-to-back writers never collide on the same O_EXCL path.
+        static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
         let bytes = serde_json::to_vec(snapshot)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, &bytes)?;
-        std::fs::rename(&tmp, path)?;
+
+        let parent = path.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "snapshot path has no parent directory",
+            )
+        })?;
+        let seq = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let tmp = parent.join(format!(
+            "{}.{}.{seq}.tmp",
+            METADATA_FILE_NAME,
+            std::process::id()
+        ));
+
+        // O_CREAT | O_EXCL: refuse to follow / overwrite a pre-placed
+        // symlink or file at the temp path.
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
+        // Write + fsync the data, cleaning up the temp file on any error so
+        // a failed write never strands an O_EXCL temp that would block the
+        // next attempt.
+        let write_then_sync = file
+            .write_all(&bytes)
+            .and_then(|()| file.sync_all());
+        if let Err(e) = write_then_sync {
+            drop(file);
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+        drop(file);
+
+        if let Err(e) = std::fs::rename(&tmp, path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+
+        // Fsync the parent directory so the rename (a directory mutation)
+        // is itself durable across a crash. A failure here is non-fatal to
+        // the logical write (the rename already happened) but we surface it
+        // so the caller can treat durability as not-yet-guaranteed.
+        let dir = std::fs::File::open(parent)?;
+        dir.sync_all()?;
         Ok(())
     }
 
@@ -435,20 +561,54 @@ impl RegistryMeta for InMemoryRegistryMeta {
         media_type: &str,
         body: Bytes,
     ) -> Result<()> {
+        let digest_str = digest.to_string();
         let mut guard = self.inner.write();
-        guard
+        // Capture prior values so we can restore the exact pre-mutation
+        // state if persistence fails (R3-2).
+        let prev_manifest = guard
             .manifests
             .entry(name.to_owned())
             .or_default()
-            .insert(digest.to_string(), (media_type.to_owned(), body));
-        if let Reference::Tag(tag) = reference {
-            guard
-                .tags
-                .entry(name.to_owned())
-                .or_default()
-                .insert(tag.clone(), digest.to_string());
+            .insert(digest_str.clone(), (media_type.to_owned(), body));
+        let prev_tag = if let Reference::Tag(tag) = reference {
+            Some((
+                tag.clone(),
+                guard
+                    .tags
+                    .entry(name.to_owned())
+                    .or_default()
+                    .insert(tag.clone(), digest_str.clone()),
+            ))
+        } else {
+            None
+        };
+        if let Err(e) = self.persist_locked(&guard) {
+            // Roll back to the captured pre-mutation state.
+            if let Some(map) = guard.manifests.get_mut(name) {
+                match prev_manifest {
+                    Some(prev) => {
+                        map.insert(digest_str.clone(), prev);
+                    }
+                    None => {
+                        map.remove(&digest_str);
+                    }
+                }
+            }
+            if let Some((tag, prev)) = prev_tag
+                && let Some(map) = guard.tags.get_mut(name)
+            {
+                match prev {
+                    Some(prev) => {
+                        map.insert(tag, prev);
+                    }
+                    None => {
+                        map.remove(&tag);
+                    }
+                }
+            }
+            drop(guard);
+            return Err(Self::persist_error(e));
         }
-        self.persist_locked(&guard);
         drop(guard);
         Ok(())
     }
@@ -487,15 +647,40 @@ impl RegistryMeta for InMemoryRegistryMeta {
                 let Some(name_map) = guard.manifests.get_mut(name) else {
                     return Ok(false);
                 };
-                let removed = name_map.remove(&digest_str).is_some();
-                if removed && let Some(tag_map) = guard.tags.get_mut(name) {
-                    tag_map.retain(|_, v| v != &digest_str);
+                let Some(removed_manifest) = name_map.remove(&digest_str) else {
+                    drop(guard);
+                    return Ok(false);
+                };
+                // Drop tags pointing at the deleted digest, remembering them
+                // so we can restore on a persistence-failure rollback (R3-2).
+                let mut removed_tags: Vec<String> = Vec::new();
+                if let Some(tag_map) = guard.tags.get_mut(name) {
+                    tag_map.retain(|tag, v| {
+                        let keep = v != &digest_str;
+                        if !keep {
+                            removed_tags.push(tag.clone());
+                        }
+                        keep
+                    });
                 }
-                if removed {
-                    self.persist_locked(&guard);
+                if let Err(e) = self.persist_locked(&guard) {
+                    // Roll back: restore the manifest and its tags.
+                    guard
+                        .manifests
+                        .entry(name.to_owned())
+                        .or_default()
+                        .insert(digest_str.clone(), removed_manifest);
+                    if !removed_tags.is_empty() {
+                        let tag_map = guard.tags.entry(name.to_owned()).or_default();
+                        for tag in removed_tags {
+                            tag_map.insert(tag, digest_str.clone());
+                        }
+                    }
+                    drop(guard);
+                    return Err(Self::persist_error(e));
                 }
                 drop(guard);
-                Ok(removed)
+                Ok(true)
             }
             Reference::Tag(_) => Ok(false),
         }
@@ -658,15 +843,28 @@ impl RegistryMeta for InMemoryRegistryMeta {
         subject: &Digest,
         descriptor: ReferrerDescriptor,
     ) -> Result<()> {
+        let subject_str = subject.to_string();
         let mut guard = self.inner.write();
         guard
             .referrers
             .entry(name.to_owned())
             .or_default()
-            .entry(subject.to_string())
+            .entry(subject_str.clone())
             .or_default()
             .push(descriptor);
-        self.persist_locked(&guard);
+        if let Err(e) = self.persist_locked(&guard) {
+            // Roll back the push we just made (R3-2). Pop only the entry we
+            // appended; leave the rest of the list intact.
+            if let Some(list) = guard
+                .referrers
+                .get_mut(name)
+                .and_then(|m| m.get_mut(&subject_str))
+            {
+                list.pop();
+            }
+            drop(guard);
+            return Err(Self::persist_error(e));
+        }
         drop(guard);
         Ok(())
     }
@@ -1189,5 +1387,195 @@ mod tests {
         // ttl=0 → already expired on the next access.
         let state = reg.get_upload_state("repo", &uuid).await.expect("get");
         assert!(state.is_none(), "expired session must be evicted on access");
+    }
+
+    #[tokio::test]
+    async fn r3_1_load_drops_manifest_whose_key_digest_mismatches_body() {
+        // R3-1: a persisted manifest is content-addressed — its map key
+        // MUST equal sha256(body). Write a metadata.json holding TWO
+        // manifests under one repo:
+        //   - a CORRUPT one whose key digest does NOT equal sha256(body)
+        //     (a crafted entry that would otherwise let the registry serve
+        //     arbitrary bytes while advertising the fake digest), and
+        //   - a VALID one alongside it.
+        // On load the corrupt entry must be dropped and the valid one kept.
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let dir = tmp.path();
+
+        let good_body = b"{\"schemaVersion\":2,\"good\":true}";
+        let good_digest = Digest::sha256_of(good_body).to_string();
+        let good_hex = hex::encode(good_body);
+
+        // The corrupt entry: key is the digest of `good_body`-with-a-twist
+        // but the stored body is different bytes, so key != sha256(body).
+        let evil_body = b"arbitrary attacker-chosen bytes";
+        let evil_hex = hex::encode(evil_body);
+        // A syntactically valid sha256 key that does NOT hash `evil_body`.
+        let fake_key = Digest::sha256_of(b"not-the-evil-body").to_string();
+        assert_ne!(
+            fake_key,
+            Digest::sha256_of(evil_body).to_string(),
+            "test setup: key must not match the body"
+        );
+
+        let snapshot = serde_json::json!({
+            "manifests": {
+                "lib/alpine": {
+                    good_digest.clone(): {
+                        "media_type": "application/vnd.oci.image.manifest.v1+json",
+                        "body_hex": good_hex,
+                    },
+                    fake_key.clone(): {
+                        "media_type": "application/vnd.oci.image.manifest.v1+json",
+                        "body_hex": evil_hex,
+                    },
+                }
+            },
+            "tags": {},
+            "referrers": {},
+        });
+        std::fs::write(
+            dir.join(super::METADATA_FILE_NAME),
+            serde_json::to_vec(&snapshot).expect("serialize"),
+        )
+        .expect("write metadata.json");
+
+        let reg = InMemoryRegistryMeta::with_persistence(dir);
+
+        // The corrupt entry must NOT be served.
+        let fake: Digest = fake_key.parse().expect("parse fake key");
+        assert!(
+            reg.get_manifest("lib/alpine", &Reference::Digest(fake))
+                .await
+                .expect("get fake")
+                .is_none(),
+            "manifest whose key != sha256(body) must be dropped on load"
+        );
+
+        // The valid entry alongside it must still resolve, with its exact
+        // bytes and digest.
+        let good: Digest = good_digest.parse().expect("parse good");
+        let served = reg
+            .get_manifest("lib/alpine", &Reference::Digest(good.clone()))
+            .await
+            .expect("get good")
+            .expect("valid manifest still served");
+        assert_eq!(served.0, good, "valid digest preserved");
+        assert_eq!(&served.2[..], &good_body[..], "valid body preserved");
+    }
+
+    #[tokio::test]
+    async fn r3_2_persist_failure_rolls_back_put_and_returns_error() {
+        // R3-2: when persistence is configured but the snapshot write
+        // fails, a manifest PUT must (a) return an error (not Ok) and
+        // (b) leave NO un-persisted manifest in memory. We force the write
+        // to fail by making the storage dir read-only after construction.
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let dir = tmp.path().to_path_buf();
+        let reg = InMemoryRegistryMeta::with_persistence(&dir);
+
+        // Make the directory read-only so write_snapshot_atomic's O_EXCL
+        // create fails (and so does the parent-dir fsync path).
+        let mut perms = std::fs::metadata(&dir).expect("metadata").permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            perms.set_mode(0o500); // r-x------ : no write
+        }
+        std::fs::set_permissions(&dir, perms).expect("chmod ro");
+
+        let body = Bytes::from_static(b"{\"schemaVersion\":2}");
+        let digest = Digest::sha256_of(&body);
+        let result = reg
+            .put_manifest(
+                "repo",
+                &Reference::Digest(digest.clone()),
+                &digest,
+                "application/vnd.oci.image.manifest.v1+json",
+                body,
+            )
+            .await;
+
+        // Restore write perms so the TempDir can be cleaned up.
+        let mut back = std::fs::metadata(&dir).expect("metadata").permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            back.set_mode(0o700);
+        }
+        std::fs::set_permissions(&dir, back).expect("chmod rw");
+
+        assert!(
+            result.is_err(),
+            "a manifest PUT that cannot be persisted must return an error, not Ok"
+        );
+        // The in-memory state must NOT retain the un-persisted manifest.
+        assert!(
+            reg.get_manifest("repo", &Reference::Digest(digest))
+                .await
+                .expect("get")
+                .is_none(),
+            "the rolled-back manifest must not be served from memory"
+        );
+    }
+
+    #[tokio::test]
+    async fn r3_2_in_memory_path_never_fails_persist() {
+        // The non-persistent (test / in-memory) deployment must keep its
+        // infallible persist path: put_manifest always succeeds.
+        let reg = InMemoryRegistryMeta::new();
+        let body = Bytes::from_static(b"body");
+        let digest = Digest::sha256_of(&body);
+        reg.put_manifest(
+            "repo",
+            &Reference::Digest(digest.clone()),
+            &digest,
+            "application/vnd.oci.image.manifest.v1+json",
+            body,
+        )
+        .await
+        .expect("in-memory put never fails on persistence");
+    }
+
+    #[test]
+    fn r3_5_write_snapshot_round_trips_and_leaves_no_temp() {
+        // R3-5: a normal save round-trips and leaves no leftover temp file
+        // in the directory (only metadata.json remains).
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let path = tmp.path().join(super::METADATA_FILE_NAME);
+        let mut snap = super::MetadataSnapshot::default();
+        snap.tags
+            .entry("repo".to_owned())
+            .or_default()
+            .insert("latest".to_owned(), "sha256:deadbeef".to_owned());
+
+        super::InMemoryRegistryMeta::write_snapshot_atomic(&path, &snap)
+            .expect("atomic write");
+
+        // The target exists and round-trips.
+        let loaded = super::InMemoryRegistryMeta::load_snapshot(&path)
+            .expect("load")
+            .expect("some");
+        assert_eq!(
+            loaded.tags.get("repo").and_then(|m| m.get("latest")),
+            Some(&"sha256:deadbeef".to_owned()),
+            "snapshot round-trips through write+load"
+        );
+
+        // No leftover *.tmp files in the directory.
+        let leftovers: Vec<_> = std::fs::read_dir(tmp.path())
+            .expect("read_dir")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| {
+                std::path::Path::new(n)
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("tmp"))
+            })
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "no temp files must be left behind: {leftovers:?}"
+        );
     }
 }
