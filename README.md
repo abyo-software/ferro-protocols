@@ -1,6 +1,7 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # ferro-protocols
 
+[![CI](https://github.com/abyo-software/ferro-protocols/actions/workflows/ci.yml/badge.svg)](https://github.com/abyo-software/ferro-protocols/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![DCO](https://img.shields.io/badge/DCO-required-green.svg)](CONTRIBUTING.md#developer-certificate-of-origin)
 [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](rust-toolchain.toml)
@@ -101,14 +102,25 @@ terms as the rest of the Rust ecosystem (Apache-2.0).
 > is at `v0.2.0` stable. See each crate's `README.md` for its current
 > status and roadmap.
 
-| Crate | Version | Extracted from | Status |
-|---|---|---|---|
-| [`ferro-blob-store`](crates/ferro-blob-store/README.md) | `v0.1.0` | FerroRepo storage | beta — content-addressed `BlobStore` trait + in-memory + filesystem backends; foundation for OCI / Maven / Cargo crates below |
-| [`ferro-lumberjack`](crates/ferro-lumberjack/README.md) | `v0.2.0` | `ferro-beat` / `ferro-heartbeat` | stable — Logstash Lumberjack v2 codec + client + server + TLS (semver from `0.2.0`) |
-| [`ferro-airflow-dag-parser`](crates/ferro-airflow-dag-parser/README.md) | `v0.1.0` | `ferro-air` | beta — static AST DAG extraction (ruff backend, 7 dynamic-fallback markers) |
-| [`ferro-maven-layout`](crates/ferro-maven-layout/README.md) | `v0.1.0` | FerroRepo Maven | beta — Maven Repository Layout 2.0 + Axum router (`http` feature) |
-| [`ferro-cargo-registry-server`](crates/ferro-cargo-registry-server/README.md) | `v0.1.0` | FerroRepo Cargo | beta — Cargo Alternative Registry sparse-index server |
-| [`ferro-oci-server`](crates/ferro-oci-server/README.md) | `v0.1.0` | FerroRepo OCI | beta — OCI Distribution v1.1 server primitives |
+The six crates split into **four libraries** (data types, codecs, and
+traits you embed) and **two server-primitive crates** (HTTP request
+handlers you mount behind your own Axum/Tower stack):
+
+**Libraries**
+
+| Crate | docs.rs | Version | Extracted from | Status |
+|---|---|---|---|---|
+| [`ferro-blob-store`](crates/ferro-blob-store/README.md) [![crates.io](https://img.shields.io/crates/v/ferro-blob-store.svg)](https://crates.io/crates/ferro-blob-store) | [![docs.rs](https://img.shields.io/docsrs/ferro-blob-store)](https://docs.rs/ferro-blob-store) | `v0.1.0` | FerroRepo storage | beta — content-addressed `BlobStore` trait + in-memory + filesystem backends; foundation for OCI / Maven / Cargo crates below |
+| [`ferro-lumberjack`](crates/ferro-lumberjack/README.md) [![crates.io](https://img.shields.io/crates/v/ferro-lumberjack.svg)](https://crates.io/crates/ferro-lumberjack) | [![docs.rs](https://img.shields.io/docsrs/ferro-lumberjack)](https://docs.rs/ferro-lumberjack) | `v0.2.0` | `ferro-beat` / `ferro-heartbeat` | stable — Logstash Lumberjack v2 codec + client + server + TLS (semver from `0.2.0`) |
+| [`ferro-airflow-dag-parser`](crates/ferro-airflow-dag-parser/README.md) [![crates.io](https://img.shields.io/crates/v/ferro-airflow-dag-parser.svg)](https://crates.io/crates/ferro-airflow-dag-parser) | [![docs.rs](https://img.shields.io/docsrs/ferro-airflow-dag-parser)](https://docs.rs/ferro-airflow-dag-parser) | `v0.1.0` | `ferro-air` | beta — static AST DAG extraction (ruff backend, 7 dynamic-fallback markers) |
+| [`ferro-maven-layout`](crates/ferro-maven-layout/README.md) [![crates.io](https://img.shields.io/crates/v/ferro-maven-layout.svg)](https://crates.io/crates/ferro-maven-layout) | [![docs.rs](https://img.shields.io/docsrs/ferro-maven-layout)](https://docs.rs/ferro-maven-layout) | `v0.1.0` | FerroRepo Maven | beta — Maven Repository Layout 2.0 + Axum router (`http` feature) |
+
+**Server primitives**
+
+| Crate | docs.rs | Version | Extracted from | Status |
+|---|---|---|---|---|
+| [`ferro-cargo-registry-server`](crates/ferro-cargo-registry-server/README.md) [![crates.io](https://img.shields.io/crates/v/ferro-cargo-registry-server.svg)](https://crates.io/crates/ferro-cargo-registry-server) | [![docs.rs](https://img.shields.io/docsrs/ferro-cargo-registry-server)](https://docs.rs/ferro-cargo-registry-server) | `v0.1.0` | FerroRepo Cargo | beta — Cargo Alternative Registry sparse-index server |
+| [`ferro-oci-server`](crates/ferro-oci-server/README.md) [![crates.io](https://img.shields.io/crates/v/ferro-oci-server.svg)](https://crates.io/crates/ferro-oci-server) | [![docs.rs](https://img.shields.io/docsrs/ferro-oci-server)](https://docs.rs/ferro-oci-server) | `v0.1.0` | FerroRepo OCI | beta — OCI Distribution v1.1 server primitives |
 
 See [`docs/roadmap.md`](docs/roadmap.md) for Tier-2 follow-ups
 (`ferro-pep503-pep691`, `ferro-go-module-proxy`, `ferro-helm-chart-repo`,
