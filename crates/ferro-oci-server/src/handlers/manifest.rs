@@ -329,19 +329,34 @@ pub async fn put_manifest(
     // (`PUT /v2/{name}/manifests/sha256:<D>`), the registry MUST verify
     // that the supplied digest matches the manifest content. Accepting a
     // mismatched digest would let a client register bytes hashing to
-    // `<D2>` under the key `<D1>`, corrupting content-addressing. We
-    // reject the mismatch with `400 DIGEST_INVALID` (only sha256 manifest
-    // digests are produced here, so compare on the hex when the algos
-    // agree).
-    if let Reference::Digest(declared) = &reference
-        && declared.algo() == digest.algo()
-        && declared.hex() != digest.hex()
-    {
-        return OciError::new(
-            OciErrorCode::DigestInvalid,
-            format!("manifest digest mismatch: reference {declared}, computed {digest}"),
-        )
-        .into_response();
+    // `<D2>` under the key `<D1>`, corrupting content-addressing.
+    //
+    // This registry canonicalises manifests with SHA-256 only
+    // (`Digest::sha256_of`). A digest reference declaring any other
+    // algorithm (e.g. `sha512:<128-hex>`) cannot be verified against the
+    // computed digest — the algos never match, so a naive
+    // "compare only when algos agree" check would *skip* verification
+    // entirely and accept arbitrary bytes under that key (R2-1). Reject
+    // non-SHA-256 digest references up front with `400 DIGEST_INVALID`,
+    // then compare the SHA-256 hex for the supported case.
+    if let Reference::Digest(declared) = &reference {
+        if declared.algo() != digest.algo() {
+            return OciError::new(
+                OciErrorCode::DigestInvalid,
+                format!(
+                    "unsupported manifest digest algorithm `{}`: only sha256 is supported",
+                    declared.algo()
+                ),
+            )
+            .into_response();
+        }
+        if declared.hex() != digest.hex() {
+            return OciError::new(
+                OciErrorCode::DigestInvalid,
+                format!("manifest digest mismatch: reference {declared}, computed {digest}"),
+            )
+            .into_response();
+        }
     }
 
     let body_len = body.len() as u64;

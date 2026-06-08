@@ -671,6 +671,42 @@ async fn manifest_put_by_digest_mismatch_is_rejected() {
 }
 
 #[tokio::test]
+async fn manifest_put_by_non_sha256_digest_reference_is_rejected() {
+    // R2-1: the registry canonicalises manifests with SHA-256 only. A
+    // PUT-by-digest using a non-sha256 algorithm (e.g. `sha512:<128 hex>`)
+    // must NOT skip digest verification: previously the handler only
+    // compared when the declared algo equalled the computed (sha256) algo,
+    // so a `sha512:` reference fell through and returned 201 for arbitrary
+    // bytes. The fix rejects the reference with DIGEST_INVALID.
+    let app = app();
+    let manifest = json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": { "mediaType": "application/vnd.oci.image.config.v1+json", "digest": EMPTY_DIGEST, "size": 2 },
+        "layers": []
+    });
+    let body = serde_json::to_vec(&manifest).expect("ser");
+    // A syntactically valid sha512 digest reference (128 hex chars).
+    let sha512_ref = format!("sha512:{}", "a".repeat(128));
+    let req = Request::builder()
+        .method(Method::PUT)
+        .uri(format!("/v2/repo/manifests/{sha512_ref}"))
+        .header(
+            header::CONTENT_TYPE,
+            "application/vnd.oci.image.manifest.v1+json",
+        )
+        .body(Body::from(body))
+        .expect("req");
+    let (status, _h, body) = send(&app, req).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "non-sha256 by-digest PUT must be rejected, not 201"
+    );
+    assert_error_code(&body, "DIGEST_INVALID");
+}
+
+#[tokio::test]
 async fn manifest_put_by_matching_digest_succeeds() {
     let app = app();
     let manifest = json!({
