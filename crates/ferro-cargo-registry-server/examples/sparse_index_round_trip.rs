@@ -39,7 +39,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             package: None,
         }],
         cksum: "0".repeat(64),
-        features: Default::default(),
+        features: std::collections::BTreeMap::default(),
         yanked: false,
         links: None,
         v: Some(2),

@@ -52,7 +52,7 @@ pub enum CargoError {
 impl CargoError {
     /// HTTP status code for this error.
     #[must_use]
-    pub fn status(&self) -> StatusCode {
+    pub const fn status(&self) -> StatusCode {
         match self {
             Self::InvalidName(_)
             | Self::InvalidVersion(_)
@@ -65,13 +65,14 @@ impl CargoError {
     }
 }
 
-fn storage_status(err: &BlobStoreError) -> StatusCode {
+const fn storage_status(err: &BlobStoreError) -> StatusCode {
     match err {
         BlobStoreError::NotFound(_) => StatusCode::NOT_FOUND,
         BlobStoreError::DigestMismatch { .. } | BlobStoreError::InvalidDigest(_) => {
             StatusCode::BAD_REQUEST
         }
-        BlobStoreError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        // I/O and any other variant map to 500; kept explicit so a new
+        // blob-store variant forces a conscious classification here.
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }

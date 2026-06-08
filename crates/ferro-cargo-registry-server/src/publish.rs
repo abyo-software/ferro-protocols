@@ -26,7 +26,7 @@ use crate::error::CargoError;
 /// Decoded publish request.
 #[derive(Debug, Clone)]
 pub struct PublishRequest {
-    /// Manifest JSON (name / vers / deps / features / rust_version / ...).
+    /// Manifest JSON (name / vers / deps / features / `rust_version` / ...).
     pub manifest: Value,
     /// Raw `.crate` tarball bytes.
     pub tarball: Bytes,

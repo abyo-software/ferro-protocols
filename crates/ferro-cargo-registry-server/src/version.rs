@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Lightweight semver validator for Cargo registry versions.
 //!
-//! Cargo versions follow SemVer 2.0 exactly. This module implements the
+//! Cargo versions follow `SemVer` 2.0 exactly. This module implements the
 //! validator surface Phase 1 needs (cheap `is_valid_semver`); a full
 //! semver type lives in `ferrorepo-common` in Phase 2 once the npm and
 //! Cargo crates can share it.
@@ -25,7 +25,7 @@ static SEMVER: LazyLock<Regex> = LazyLock::new(|| {
     .expect("static semver regex compiles")
 });
 
-/// Return `true` iff `v` is a legal SemVer 2.0 version.
+/// Return `true` iff `v` is a legal `SemVer` 2.0 version.
 #[must_use]
 pub fn is_valid_semver(v: &str) -> bool {
     SEMVER.is_match(v)

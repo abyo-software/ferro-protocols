@@ -45,7 +45,7 @@ pub struct IndexDep {
 /// A single line in the sparse index.
 ///
 /// Reference: spec fields — name / vers / deps / cksum / features /
-/// yanked / links / v / features2 / rust_version.
+/// yanked / links / v / features2 / `rust_version`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexEntry {
     /// Crate name (canonical-case, as published).

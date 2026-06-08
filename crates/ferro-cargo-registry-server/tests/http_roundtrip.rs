@@ -354,9 +354,9 @@ async fn unknown_crate_download_404() {
 }
 
 /// DD R2 F-R2-021: the sparse-index GET must honour `If-None-Match`.
-/// The first GET returns `200 OK` with a strong ETag; the second GET
-/// carrying the same ETag returns `304 Not Modified` with no body; a
-/// mismatched ETag falls back to `200 OK`.
+/// The first GET returns `200 OK` with a strong `ETag`; the second GET
+/// carrying the same `ETag` returns `304 Not Modified` with no body; a
+/// mismatched `ETag` falls back to `200 OK`.
 #[tokio::test]
 async fn sparse_index_honours_if_none_match() {
     let (app, _tmp) = setup();
