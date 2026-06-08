@@ -2,7 +2,7 @@
 //! Minimal POM (`pom.xml`) deserialization.
 //!
 //! The Maven POM is a large XML document; this module extracts only the
-//! fields FerroRepo needs to validate uploads and build metadata index
+//! fields `FerroRepo` needs to validate uploads and build metadata index
 //! records:
 //!
 //! - `modelVersion`
@@ -60,8 +60,8 @@ pub struct PomParent {
 /// [`crate::xml::from_str_panic_safe`], which wraps `quick_xml::de` in
 /// `std::panic::catch_unwind` because `quick_xml::de` 0.39.2 hits an
 /// `unreachable!()` macro at `quick-xml-0.39.2/src/de/mod.rs:2903:37`
-/// on certain malformed inputs (e.g. mixed `<><groupId.p...
-/// <!DOCTYPe.;:="0"1"...` shapes — see the 2026-05-15 fuzz artifact
+/// on certain malformed inputs (e.g. mixed
+/// `<><groupId.p... <!DOCTYPe.;:="0"1"...` shapes) — see the 2026-05-15 fuzz artifact
 /// `crash-1ceeadf1`). Production callers (`ferro-maven-server`
 /// registry PUT handler) must never abort on attacker-supplied POM
 /// bodies, so the panic is converted into [`MavenError::InvalidPom`]

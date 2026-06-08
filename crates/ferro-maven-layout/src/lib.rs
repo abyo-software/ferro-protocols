@@ -2,7 +2,7 @@
 //! `ferro-maven-layout`
 //!
 //! Maven 2/3 repository layout, POM (`pom.xml`) parsing, `maven-metadata.xml`
-//! generation, and SNAPSHOT artifact timestamping for FerroRepo.
+//! generation, and SNAPSHOT artifact timestamping for `FerroRepo`.
 //!
 //! ## Spec references
 //!

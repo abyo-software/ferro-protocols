@@ -118,17 +118,16 @@ async fn serve_checksum(
     // treat a missing `.sha1` sidecar as fatal, so synthesising it is
     // strictly a compatibility courtesy.
     let key = build_key(repo, path);
-    if let Some(d) = state.layout.read().await.get(&key).cloned() {
+    let sidecar = state.layout.read().await.get(&key).cloned();
+    if let Some(d) = sidecar {
         let bytes = state.blobs.get(&d).await?;
         return Ok(build_raw_response(bytes, with_body));
     }
 
     // Strip the trailing `.<algo>` extension and look up the main file.
-    let main_path =
-        path.strip_suffix(&format!(".{}", algo.extension()))
-            .ok_or(MavenError::NotFound(format!(
-                "sidecar path {path} has no algo suffix"
-            )))?;
+    let main_path = path
+        .strip_suffix(&format!(".{}", algo.extension()))
+        .ok_or_else(|| MavenError::NotFound(format!("sidecar path {path} has no algo suffix")))?;
     let main_key = build_key(repo, main_path);
     let Some(digest) = state.layout.read().await.get(&main_key).cloned() else {
         return Err(MavenError::NotFound(path.to_string()));
@@ -418,7 +417,8 @@ async fn put_checksum(
         .strip_suffix(&format!(".{}", algo.extension()))
         .ok_or_else(|| MavenError::InvalidPath("sidecar without algo suffix".into()))?;
     let main_key = build_key(repo, main_path);
-    if let Some(d) = state.layout.read().await.get(&main_key).cloned() {
+    let main_digest = state.layout.read().await.get(&main_key).cloned();
+    if let Some(d) = main_digest {
         let bytes = state.blobs.get(&d).await?;
         let actual = compute_checksum(algo, &bytes)
             .ok_or_else(|| MavenError::ChecksumMismatch(format!("cannot compute {algo:?}")))?;

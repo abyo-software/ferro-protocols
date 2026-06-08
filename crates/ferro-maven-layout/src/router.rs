@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Axum router for the Maven 2/3 protocol.
 //!
-//! The mount point is conventionally `/repository/{repo}` so FerroRepo
+//! The mount point is conventionally `/repository/{repo}` so `FerroRepo`
 //! can host many named Maven repositories side-by-side. The wildcard
 //! `{*path}` captures the complete Maven layout path below that.
 //!

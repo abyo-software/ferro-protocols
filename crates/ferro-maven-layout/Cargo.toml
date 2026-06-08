@@ -47,16 +47,8 @@ tower = { version = "0.5", features = ["util"] }
 tempfile = "3"
 http-body-util = "0.1"
 
-# Inherit workspace lints but loosen pedantic/nursery for ported code.
-# `unsafe_code = "forbid"` and `missing_docs = "warn"` (the meaningful
-# guards) still apply.
-[lints.rust]
-unsafe_code = "forbid"
-missing_docs = "warn"
-
-[lints.clippy]
-pedantic = { level = "allow", priority = -1 }
-nursery = { level = "allow", priority = -1 }
+[lints]
+workspace = true
 
 [package.metadata.docs.rs]
 all-features = true

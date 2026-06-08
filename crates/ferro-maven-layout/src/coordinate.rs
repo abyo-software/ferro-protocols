@@ -103,13 +103,15 @@ impl Coordinate {
     /// `{artifactId}-{version}[-{classifier}].{extension}`.
     #[must_use]
     pub fn filename(&self) -> String {
-        match &self.classifier {
-            Some(c) => format!(
-                "{}-{}-{}.{}",
-                self.artifact_id, self.version, c, self.extension
-            ),
-            None => format!("{}-{}.{}", self.artifact_id, self.version, self.extension),
-        }
+        self.classifier.as_ref().map_or_else(
+            || format!("{}-{}.{}", self.artifact_id, self.version, self.extension),
+            |c| {
+                format!(
+                    "{}-{}-{}.{}",
+                    self.artifact_id, self.version, c, self.extension
+                )
+            },
+        )
     }
 
     /// Full repository path (without leading slash):

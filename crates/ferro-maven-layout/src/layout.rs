@@ -103,10 +103,7 @@ pub fn parse_layout_path(path: &str) -> Result<LayoutPath, MavenError> {
     let coordinate = Coordinate::new(group_id, artifact_id, version, classifier, extension)
         .map_err(|e| MavenError::InvalidPath(format!("{e}")))?;
 
-    let class = match checksum {
-        Some(algo) => PathClass::Checksum(algo),
-        None => PathClass::Artifact,
-    };
+    let class = checksum.map_or(PathClass::Artifact, PathClass::Checksum);
 
     Ok(LayoutPath { coordinate, class })
 }

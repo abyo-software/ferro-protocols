@@ -69,7 +69,7 @@ impl ChecksumAlgo {
 ///
 /// MD5 is deliberately absent; callers that have opted in to
 /// [`ChecksumAlgo::Md5`] should either store client-provided sidecars
-/// verbatim (the FerroRepo default) or reject the request. Returning
+/// verbatim (the `FerroRepo` default) or reject the request. Returning
 /// `None` keeps compilation free of the `md5` crate dependency.
 #[must_use]
 pub fn compute_checksum(algo: ChecksumAlgo, bytes: &[u8]) -> Option<String> {

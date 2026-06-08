@@ -53,7 +53,7 @@ pub enum MavenError {
 impl MavenError {
     /// HTTP status code for this error category.
     #[must_use]
-    pub fn status(&self) -> StatusCode {
+    pub const fn status(&self) -> StatusCode {
         match self {
             Self::InvalidPath(_)
             | Self::InvalidPom(_)
@@ -67,14 +67,13 @@ impl MavenError {
 }
 
 #[cfg(feature = "http")]
-fn storage_status(err: &BlobStoreError) -> StatusCode {
+const fn storage_status(err: &BlobStoreError) -> StatusCode {
     match err {
         BlobStoreError::NotFound(_) => StatusCode::NOT_FOUND,
         BlobStoreError::DigestMismatch { .. } | BlobStoreError::InvalidDigest(_) => {
             StatusCode::BAD_REQUEST
         }
-        BlobStoreError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
-        // BlobStoreError is `#[non_exhaustive]`; future variants land here.
+        // `BlobStoreError::Io(_)`, plus future `#[non_exhaustive]` variants.
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }

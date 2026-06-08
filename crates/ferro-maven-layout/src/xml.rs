@@ -35,7 +35,7 @@ use serde::de::DeserializeOwned;
 /// # Errors
 ///
 /// Returns `Err(on_err(..))` on any parse error or recovered panic.
-pub(crate) fn from_str_panic_safe<T, E>(
+pub fn from_str_panic_safe<T, E>(
     xml: &str,
     on_err: impl Fn(String) -> E,
 ) -> Result<T, E>
@@ -51,13 +51,14 @@ where
         Ok(Ok(value)) => Ok(value),
         Ok(Err(e)) => Err(on_err(format!("XML parse failed: {e}"))),
         Err(panic_payload) => {
-            let msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
-                (*s).to_string()
-            } else if let Some(s) = panic_payload.downcast_ref::<String>() {
-                s.clone()
-            } else {
-                "non-string panic payload".to_string()
-            };
+            let msg = panic_payload.downcast_ref::<&str>().map_or_else(
+                || {
+                    panic_payload
+                        .downcast_ref::<String>()
+                        .map_or_else(|| "non-string panic payload".to_string(), Clone::clone)
+                },
+                |s| (*s).to_string(),
+            );
             Err(on_err(format!(
                 "XML parser panicked on malformed input: {msg}"
             )))
