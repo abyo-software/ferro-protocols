@@ -72,6 +72,7 @@ pub mod name;
 pub mod owners;
 pub mod publish;
 pub mod router;
+pub mod serve;
 pub mod version;
 pub mod yank;
 
@@ -83,6 +84,7 @@ pub use name::{MAX_NAME_LEN, index_path, is_valid_name, validate_name};
 pub use owners::{Owner, OwnersMutationResponse, OwnersRequest, OwnersResponse};
 pub use publish::{PublishRequest, encode as encode_publish_body, parse as parse_publish_body};
 pub use router::{CargoState, CrateRecord, router};
+pub use serve::{Config, build_app, build_state, init_tracing, probe_routes, serve};
 pub use version::is_valid_semver;
 pub use yank::YankResponse;
 
