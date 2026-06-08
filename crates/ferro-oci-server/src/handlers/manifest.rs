@@ -382,21 +382,31 @@ pub async fn put_manifest(
     }
 
     let body_len = body.len() as u64;
+    // R4-1: a manifest that declares a `subject` couples two mutations — the
+    // manifest/tag insert and the referrer-index push. Persisting them as two
+    // separate snapshot writes (one per call) is NOT atomic: a failure of the
+    // second would leave the manifest/tag already durable while the client got
+    // a 5xx, yielding partial state on restart. Build the (optional) referrer
+    // descriptor up front and hand BOTH to a single transactional registry
+    // method that applies them under one write lock + one snapshot write,
+    // rolling back everything together if persistence fails.
+    let referrer = build_referrer(&parsed, &digest, &content_type, body_len);
     if let Err(e) = state
         .registry
-        .put_manifest(name, &reference, &digest, &content_type, body.clone())
+        .put_manifest_with_referrer(
+            name,
+            &reference,
+            &digest,
+            &content_type,
+            body.clone(),
+            referrer,
+        )
         .await
     {
-        // R3-2: a persistence failure here means the manifest was rolled
-        // back in memory; surface 5xx rather than 201 so the client knows
-        // it was not durably stored.
+        // R3-2: a persistence failure here means the manifest, tag, AND
+        // referrer were all rolled back in memory; surface 5xx rather than 201
+        // so the client knows nothing was durably stored.
         return map_mutation_error(e).into_response();
-    }
-
-    if let Err(e) = register_referrer_if_any(state, name, &parsed, &digest, &content_type, body_len)
-        .await
-    {
-        return e.into_response();
     }
 
     let mut out = HeaderMap::new();
@@ -421,26 +431,24 @@ pub async fn put_manifest(
     (StatusCode::CREATED, out).into_response()
 }
 
-/// Register a referrer if the manifest declares a `subject`.
+/// Build the `(subject, descriptor)` pair to register if the manifest
+/// declares a parseable `subject` digest.
 ///
-/// No-op (returns `Ok`) when the manifest has no parseable subject
-/// digest.
-async fn register_referrer_if_any(
-    state: &AppState,
-    name: &str,
+/// Returns `None` when the manifest has no parseable subject digest, in which
+/// case the manifest PUT is a plain manifest/tag write with no referrer leg.
+/// This is a pure builder — it performs no mutation — so the caller can hand
+/// the result to a single transactional registry write (R4-1).
+fn build_referrer(
     parsed: &Value,
     digest: &Digest,
     content_type: &str,
     body_len: u64,
-) -> Result<(), OciError> {
-    let Some(subj) = parsed
+) -> Option<(Digest, ReferrerDescriptor)> {
+    let subj = parsed
         .get("subject")
         .and_then(|s| s.get("digest"))
         .and_then(Value::as_str)
-        .and_then(|s| s.parse::<Digest>().ok())
-    else {
-        return Ok(());
-    };
+        .and_then(|s| s.parse::<Digest>().ok())?;
 
     // OCI Image Spec v1.1: the referrers descriptor's `artifactType`
     // is the manifest's top-level `artifactType`, or — when that is
@@ -476,11 +484,7 @@ async fn register_referrer_if_any(
         artifact_type,
         annotations,
     };
-    state
-        .registry
-        .register_referrer(name, &subj, descriptor)
-        .await
-        .map_err(map_mutation_error)
+    Some((subj, descriptor))
 }
 
 /// Handle `DELETE /v2/{name}/manifests/{reference}`.

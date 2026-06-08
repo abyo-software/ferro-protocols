@@ -1058,3 +1058,150 @@ async fn patch_content_range_length_match_is_accepted() {
     let (status, _h, _b) = send(&app, req).await;
     assert_eq!(status, StatusCode::ACCEPTED, "matching range/body length");
 }
+
+// ---- R4-1: atomic manifest+referrer PUT across persist failure ----------
+
+/// Build a router backed by a persistence registry whose snapshot writes are
+/// forced to FAIL: `metadata.json` is pre-placed as a non-empty directory so
+/// the atomic rename can never clobber it. Returns the app plus the owning
+/// temp dir (kept alive for the test's lifetime).
+fn app_with_failing_persist() -> (Router, tempfile::TempDir) {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let meta = tmp.path().join(ferro_oci_server::METADATA_FILE_NAME);
+    std::fs::create_dir(&meta).expect("metadata.json as dir");
+    std::fs::write(meta.join("child"), b"x").expect("child");
+    let blob_store: SharedBlobStore = Arc::new(InMemoryBlobStore::new());
+    let registry = Arc::new(InMemoryRegistryMeta::with_persistence(tmp.path()));
+    let state = AppState::new(blob_store, registry);
+    (router(state).merge(probe_routes()), tmp)
+}
+
+#[tokio::test]
+async fn manifest_put_with_subject_persist_failure_rolls_back_all_and_returns_500() {
+    // R4-1: a manifest PUT declaring a `subject` couples the manifest/tag
+    // persist with the referrer-index persist. If durability fails the handler
+    // must surface 500 AND leave NOTHING behind — neither the manifest/tag nor
+    // the referrer may survive, since the client was told it failed.
+    let (app, _tmp) = app_with_failing_persist();
+    let subject_digest = Digest::sha256_of(b"the-subject-manifest").to_string();
+    let manifest = json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "artifactType": "application/spdx+json",
+        "config": {
+            "mediaType": "application/vnd.oci.image.config.v1+json",
+            "digest": EMPTY_DIGEST,
+            "size": 2
+        },
+        "layers": [],
+        "subject": {
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "digest": subject_digest,
+            "size": 7
+        }
+    });
+    let body = serde_json::to_vec(&manifest).expect("ser");
+    let digest = Digest::sha256_of(&body).to_string();
+    let req = Request::builder()
+        .method(Method::PUT)
+        .uri("/v2/lib/withsub/manifests/latest")
+        .header(
+            header::CONTENT_TYPE,
+            "application/vnd.oci.image.manifest.v1+json",
+        )
+        .body(Body::from(body))
+        .expect("req");
+    let (status, _h, _b) = send(&app, req).await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "persist failure on a subject PUT must be 500"
+    );
+
+    // The manifest must NOT resolve by tag.
+    let (tag_status, _h, _b) = send(&app, get("/v2/lib/withsub/manifests/latest")).await;
+    assert_eq!(
+        tag_status,
+        StatusCode::NOT_FOUND,
+        "rolled-back manifest must not resolve by tag"
+    );
+    // Nor by digest.
+    let (digest_status, _h, _b) =
+        send(&app, get(&format!("/v2/lib/withsub/manifests/{digest}"))).await;
+    assert_eq!(
+        digest_status,
+        StatusCode::NOT_FOUND,
+        "rolled-back manifest must not resolve by digest"
+    );
+    // The referrer must NOT have been registered.
+    let (ref_status, _h, ref_body) =
+        send(&app, get(&format!("/v2/lib/withsub/referrers/{subject_digest}"))).await;
+    assert_eq!(ref_status, StatusCode::OK, "referrers list is always 200");
+    let v: Value = serde_json::from_slice(&ref_body).expect("referrers json");
+    assert_eq!(
+        v["manifests"].as_array().map_or(0, Vec::len),
+        0,
+        "no referrer may survive the rolled-back PUT: {v}"
+    );
+    // The brand-new repo must not linger in the catalog (R4-2 via R4-1).
+    let (_cs, _h, cat_body) = send(&app, get("/v2/_catalog")).await;
+    let cat: Value = serde_json::from_slice(&cat_body).expect("catalog json");
+    assert_eq!(
+        cat["repositories"].as_array().map_or(0, Vec::len),
+        0,
+        "failed first publish must leave catalog empty: {cat}"
+    );
+}
+
+#[tokio::test]
+async fn manifest_put_with_subject_success_registers_manifest_and_referrer() {
+    // R4-1 success path through the full handler: a subject PUT that persists
+    // cleanly registers BOTH the manifest/tag and its referrer.
+    let app = app();
+    let subject_digest = Digest::sha256_of(b"the-subject-manifest").to_string();
+    let manifest = json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "artifactType": "application/spdx+json",
+        "config": {
+            "mediaType": "application/vnd.oci.image.config.v1+json",
+            "digest": EMPTY_DIGEST,
+            "size": 2
+        },
+        "layers": [],
+        "subject": {
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "digest": subject_digest,
+            "size": 7
+        }
+    });
+    let body = serde_json::to_vec(&manifest).expect("ser");
+    let digest = Digest::sha256_of(&body).to_string();
+    let req = Request::builder()
+        .method(Method::PUT)
+        .uri("/v2/lib/withsub/manifests/latest")
+        .header(
+            header::CONTENT_TYPE,
+            "application/vnd.oci.image.manifest.v1+json",
+        )
+        .body(Body::from(body))
+        .expect("req");
+    let (status, headers, _b) = send(&app, req).await;
+    assert_eq!(status, StatusCode::CREATED, "subject PUT ⇒ 201");
+    assert_eq!(
+        headers["oci-subject"], subject_digest,
+        "OCI-Subject header surfaces the subject"
+    );
+
+    // Manifest resolves by tag.
+    let (tag_status, _h, _b) = send(&app, get("/v2/lib/withsub/manifests/latest")).await;
+    assert_eq!(tag_status, StatusCode::OK, "manifest resolves by tag");
+    // Referrer is registered and surfaces under the subject.
+    let (ref_status, _h, ref_body) =
+        send(&app, get(&format!("/v2/lib/withsub/referrers/{subject_digest}"))).await;
+    assert_eq!(ref_status, StatusCode::OK);
+    let v: Value = serde_json::from_slice(&ref_body).expect("referrers json");
+    let list = v["manifests"].as_array().expect("manifests array");
+    assert_eq!(list.len(), 1, "exactly one referrer registered: {v}");
+    assert_eq!(list[0]["digest"], digest, "referrer points at the PUT manifest");
+}

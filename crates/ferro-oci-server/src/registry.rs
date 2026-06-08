@@ -100,6 +100,31 @@ pub trait RegistryMeta: Send + Sync {
         body: Bytes,
     ) -> Result<()>;
 
+    /// Persist a manifest body, its optional tag alias, AND an optional
+    /// referrer registration as ONE atomic transaction (R4-1).
+    ///
+    /// A manifest that declares a `subject` produces two logically coupled
+    /// mutations — the manifest/tag insert and the referrer-index push.
+    /// Performing them as two separate [`put_manifest`] + [`register_referrer`]
+    /// calls means each does its own snapshot write, so a failure of the
+    /// second leaves the first already durable: the manifest/tag survives a
+    /// restart while the referrer does not, even though the client received a
+    /// 5xx. This method applies all three sub-mutations under ONE write lock
+    /// and ONE snapshot write. If persistence fails, EVERY in-memory change
+    /// (manifest, tag, referrer, and any maps created en route) is rolled
+    /// back and nothing is written, so the on-disk state is never partial.
+    ///
+    /// When `referrer` is `None` this is equivalent to [`put_manifest`].
+    async fn put_manifest_with_referrer(
+        &self,
+        name: &str,
+        reference: &Reference,
+        digest: &Digest,
+        media_type: &str,
+        body: Bytes,
+        referrer: Option<(Digest, ReferrerDescriptor)>,
+    ) -> Result<()>;
+
     /// Fetch a manifest by (name, reference).
     ///
     /// Returns `(canonical-digest, media-type, body)`.
@@ -448,6 +473,30 @@ impl InMemoryRegistryMeta {
         ferro_blob_store::BlobStoreError::Io(e)
     }
 
+    /// Prune the name-level `manifests` / `tags` / `referrers` entries for
+    /// `name` when they have become empty (R4-2).
+    ///
+    /// A rollback that removes the only manifest/tag/referrer a brand-new repo
+    /// ever held must also drop the now-empty per-repo maps that the
+    /// `entry(..).or_default()` insertions created; otherwise the repo lingers
+    /// in `_catalog` / list state even though it holds nothing. Repos that
+    /// still contain other manifests/tags/referrers are left untouched.
+    fn prune_empty_repo(state: &mut InMemoryState, name: &str) {
+        if state.manifests.get(name).is_some_and(BTreeMap::is_empty) {
+            state.manifests.remove(name);
+        }
+        if state.tags.get(name).is_some_and(BTreeMap::is_empty) {
+            state.tags.remove(name);
+        }
+        if state
+            .referrers
+            .get(name)
+            .is_some_and(BTreeMap::is_empty)
+        {
+            state.referrers.remove(name);
+        }
+    }
+
     /// Serialise `snapshot` and write it to `path` atomically and durably.
     ///
     /// R3-5: a fixed sibling temp path (`metadata.json.tmp`) plus a plain
@@ -561,10 +610,25 @@ impl RegistryMeta for InMemoryRegistryMeta {
         media_type: &str,
         body: Bytes,
     ) -> Result<()> {
+        self.put_manifest_with_referrer(name, reference, digest, media_type, body, None)
+            .await
+    }
+
+    async fn put_manifest_with_referrer(
+        &self,
+        name: &str,
+        reference: &Reference,
+        digest: &Digest,
+        media_type: &str,
+        body: Bytes,
+        referrer: Option<(Digest, ReferrerDescriptor)>,
+    ) -> Result<()> {
         let digest_str = digest.to_string();
         let mut guard = self.inner.write();
-        // Capture prior values so we can restore the exact pre-mutation
-        // state if persistence fails (R3-2).
+
+        // Apply all three sub-mutations under the single write lock, capturing
+        // enough prior state to restore the exact pre-mutation snapshot if the
+        // one persist below fails (R3-2 / R4-1).
         let prev_manifest = guard
             .manifests
             .entry(name.to_owned())
@@ -582,8 +646,23 @@ impl RegistryMeta for InMemoryRegistryMeta {
         } else {
             None
         };
+        // The referrer push appends to the (name, subject) list; on rollback we
+        // pop exactly the entry we appended, leaving any siblings intact.
+        let referrer_subject = referrer.map(|(subject, descriptor)| {
+            let subject_str = subject.to_string();
+            guard
+                .referrers
+                .entry(name.to_owned())
+                .or_default()
+                .entry(subject_str.clone())
+                .or_default()
+                .push(descriptor);
+            subject_str
+        });
+
         if let Err(e) = self.persist_locked(&guard) {
-            // Roll back to the captured pre-mutation state.
+            // Roll back ALL of (manifest, tag, referrer) to the captured
+            // pre-mutation state so nothing is left partially applied.
             if let Some(map) = guard.manifests.get_mut(name) {
                 match prev_manifest {
                     Some(prev) => {
@@ -606,6 +685,22 @@ impl RegistryMeta for InMemoryRegistryMeta {
                     }
                 }
             }
+            if let Some(subject_str) = referrer_subject
+                && let Some(subject_map) = guard.referrers.get_mut(name)
+                && let Some(list) = subject_map.get_mut(&subject_str)
+            {
+                list.pop();
+                if list.is_empty() {
+                    subject_map.remove(&subject_str);
+                }
+            }
+            // R4-2: a failed FIRST publish to a brand-new repo would otherwise
+            // leave behind the empty `manifests[name]` / `tags[name]` /
+            // `referrers[name]` maps created by the `entry(..).or_default()`
+            // calls above, so the repo would still surface in catalog / list
+            // state despite the rollback. Prune any name-level entries that
+            // became (or stayed) empty as a result of the rollback.
+            Self::prune_empty_repo(&mut guard, name);
             drop(guard);
             return Err(Self::persist_error(e));
         }
@@ -855,13 +950,17 @@ impl RegistryMeta for InMemoryRegistryMeta {
         if let Err(e) = self.persist_locked(&guard) {
             // Roll back the push we just made (R3-2). Pop only the entry we
             // appended; leave the rest of the list intact.
-            if let Some(list) = guard
-                .referrers
-                .get_mut(name)
-                .and_then(|m| m.get_mut(&subject_str))
+            if let Some(subject_map) = guard.referrers.get_mut(name)
+                && let Some(list) = subject_map.get_mut(&subject_str)
             {
                 list.pop();
+                if list.is_empty() {
+                    subject_map.remove(&subject_str);
+                }
             }
+            // R4-2: drop the now-empty per-repo referrer map a failed FIRST
+            // referrer registration would otherwise leave behind.
+            Self::prune_empty_repo(&mut guard, name);
             drop(guard);
             return Err(Self::persist_error(e));
         }
@@ -1137,6 +1236,347 @@ mod tests {
         // Repository catalog reflects the persisted repo.
         let repos = reg2.list_repositories(None, None).await.expect("repos");
         assert_eq!(repos, vec!["lib/alpine".to_owned()]);
+    }
+
+    /// Build a persistence-backed registry whose snapshot writes are forced to
+    /// FAIL by pre-placing `metadata.json` as a non-empty *directory*: the
+    /// atomic `rename(tmp, metadata.json)` then cannot clobber it (`EISDIR`),
+    /// so every `persist_locked` returns `Err` and the mutating methods must
+    /// roll back. Returns the registry plus the owning temp dir.
+    fn registry_with_failing_persist() -> (InMemoryRegistryMeta, tempfile::TempDir) {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let meta = tmp.path().join(super::METADATA_FILE_NAME);
+        std::fs::create_dir(&meta).expect("metadata.json as dir");
+        // Make it non-empty so a rename over it is rejected.
+        std::fs::write(meta.join("child"), b"x").expect("child");
+        let reg = InMemoryRegistryMeta::with_persistence(tmp.path());
+        (reg, tmp)
+    }
+
+    #[tokio::test]
+    async fn put_with_subject_persist_failure_rolls_back_manifest_tag_and_referrer() {
+        // R4-1: a manifest PUT that declares a `subject` couples the
+        // manifest/tag insert with the referrer push. A persist failure must
+        // roll back ALL of them — neither the manifest/tag NOR the referrer
+        // may survive — and surface an error.
+        let (reg, _tmp) = registry_with_failing_persist();
+        let body = Bytes::from_static(b"{\"schemaVersion\":2}");
+        let digest = Digest::sha256_of(&body);
+        let subject = Digest::sha256_of(b"subject-manifest");
+        let referrer_digest = Digest::sha256_of(b"sbom-referrer");
+
+        let err = reg
+            .put_manifest_with_referrer(
+                "lib/alpine",
+                &Reference::Tag("latest".to_owned()),
+                &digest,
+                "application/vnd.oci.image.manifest.v1+json",
+                body.clone(),
+                Some((
+                    subject.clone(),
+                    ReferrerDescriptor {
+                        media_type: "application/vnd.oci.image.manifest.v1+json".to_owned(),
+                        digest: referrer_digest,
+                        size: 12,
+                        artifact_type: Some("application/spdx+json".to_owned()),
+                        annotations: None,
+                    },
+                )),
+            )
+            .await
+            .expect_err("persist failure must surface as Err");
+        assert!(
+            matches!(err, ferro_blob_store::BlobStoreError::Io(_)),
+            "persist failure maps to Io error, got {err:?}"
+        );
+
+        // Manifest absent by digest AND by tag.
+        assert!(
+            reg.get_manifest("lib/alpine", &Reference::Digest(digest.clone()))
+                .await
+                .expect("get by digest")
+                .is_none(),
+            "manifest must be fully rolled back (digest)"
+        );
+        assert!(
+            reg.get_manifest("lib/alpine", &Reference::Tag("latest".to_owned()))
+                .await
+                .expect("get by tag")
+                .is_none(),
+            "tag must be fully rolled back"
+        );
+        // Referrer absent.
+        let referrers = reg
+            .list_referrers("lib/alpine", &subject, None)
+            .await
+            .expect("list referrers");
+        assert!(referrers.is_empty(), "referrer must be fully rolled back");
+        // R4-2: the brand-new repo must not linger in the catalog.
+        let repos = reg.list_repositories(None, None).await.expect("repos");
+        assert!(
+            repos.is_empty(),
+            "failed first publish must leave repo absent from catalog, got {repos:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn put_with_subject_success_registers_manifest_tag_and_referrer() {
+        // R4-1 success path: the transactional method still registers BOTH the
+        // manifest/tag and the referrer when persistence succeeds.
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let reg = InMemoryRegistryMeta::with_persistence(tmp.path());
+        let body = Bytes::from_static(b"{\"schemaVersion\":2}");
+        let digest = Digest::sha256_of(&body);
+        let subject = Digest::sha256_of(b"subject-manifest");
+        let referrer_digest = Digest::sha256_of(b"sbom-referrer");
+
+        reg.put_manifest_with_referrer(
+            "lib/alpine",
+            &Reference::Tag("latest".to_owned()),
+            &digest,
+            "application/vnd.oci.image.manifest.v1+json",
+            body.clone(),
+            Some((
+                subject.clone(),
+                ReferrerDescriptor {
+                    media_type: "application/vnd.oci.image.manifest.v1+json".to_owned(),
+                    digest: referrer_digest.clone(),
+                    size: 12,
+                    artifact_type: Some("application/spdx+json".to_owned()),
+                    annotations: None,
+                },
+            )),
+        )
+        .await
+        .expect("put with referrer");
+
+        let by_tag = reg
+            .get_manifest("lib/alpine", &Reference::Tag("latest".to_owned()))
+            .await
+            .expect("get by tag")
+            .expect("tag resolves");
+        assert_eq!(by_tag.0, digest);
+        let referrers = reg
+            .list_referrers("lib/alpine", &subject, None)
+            .await
+            .expect("list referrers");
+        assert_eq!(referrers.len(), 1, "referrer registered");
+        assert_eq!(referrers[0].digest, referrer_digest);
+    }
+
+    #[tokio::test]
+    async fn referrer_leg_persist_failure_does_not_strand_manifest() {
+        // R4-1, the core atomicity property: when the referrer leg cannot be
+        // made durable, the manifest/tag MUST NOT be left stranded on its own.
+        //
+        // (a) First we demonstrate the *bug* the fix prevents: the pre-fix
+        //     two-call sequence (`put_manifest` then `register_referrer`, EACH
+        //     its own snapshot write) lets the first write succeed and the
+        //     second fail, stranding the manifest.
+        // (b) Then we show the SINGLE transactional method does NOT do this —
+        //     under a "next write fails" condition it rolls everything back
+        //     together so nothing is stranded.
+        let subject = Digest::sha256_of(b"coupled-subject");
+        let referrer_descriptor = || ReferrerDescriptor {
+            media_type: "application/vnd.oci.image.manifest.v1+json".to_owned(),
+            digest: Digest::sha256_of(b"coupled-referrer"),
+            size: 16,
+            artifact_type: None,
+            annotations: None,
+        };
+
+        // --- (a) OLD two-call path: reproduce the stranding bug -------------
+        {
+            let tmp = tempfile::TempDir::new().expect("tempdir");
+            let reg = InMemoryRegistryMeta::with_persistence(tmp.path());
+            let body = Bytes::from_static(b"old-manifest");
+            let digest = Digest::sha256_of(&body);
+            // First write (manifest+tag) succeeds → durable on its own.
+            reg.put_manifest(
+                "old/repo",
+                &Reference::Tag("latest".to_owned()),
+                &digest,
+                "application/vnd.oci.image.manifest.v1+json",
+                body,
+            )
+            .await
+            .expect("first write persisted");
+            // Break persistence, then attempt the SECOND write (referrer).
+            let meta = tmp.path().join(super::METADATA_FILE_NAME);
+            std::fs::remove_file(&meta).expect("remove snapshot");
+            std::fs::create_dir(&meta).expect("metadata.json as dir");
+            std::fs::write(meta.join("child"), b"x").expect("child");
+            reg.register_referrer("old/repo", &subject, referrer_descriptor())
+                .await
+                .expect_err("second write must fail");
+            // The bug: the manifest is STRANDED (still durable) while the
+            // referrer is gone — exactly the partial state R4-1 is about.
+            assert!(
+                reg.get_manifest("old/repo", &Reference::Digest(digest))
+                    .await
+                    .expect("get old")
+                    .is_some(),
+                "two-call path strands the manifest (the pre-fix bug)"
+            );
+        }
+
+        // --- (b) NEW transactional path: no stranding -----------------------
+        {
+            let tmp = tempfile::TempDir::new().expect("tempdir");
+            let reg = InMemoryRegistryMeta::with_persistence(tmp.path());
+            // A seed publish makes the first real write happen, then we break
+            // persistence so the coupled write below fails as ONE unit.
+            let seed_body = Bytes::from_static(b"seed");
+            let seed_digest = Digest::sha256_of(&seed_body);
+            reg.put_manifest(
+                "seed/repo",
+                &Reference::Tag("v1".to_owned()),
+                &seed_digest,
+                "application/vnd.oci.image.manifest.v1+json",
+                seed_body,
+            )
+            .await
+            .expect("seed persisted");
+            let meta = tmp.path().join(super::METADATA_FILE_NAME);
+            std::fs::remove_file(&meta).expect("remove snapshot");
+            std::fs::create_dir(&meta).expect("metadata.json as dir");
+            std::fs::write(meta.join("child"), b"x").expect("child");
+
+            let body = Bytes::from_static(b"coupled-manifest");
+            let digest = Digest::sha256_of(&body);
+            reg.put_manifest_with_referrer(
+                "coupled/repo",
+                &Reference::Tag("latest".to_owned()),
+                &digest,
+                "application/vnd.oci.image.manifest.v1+json",
+                body,
+                Some((subject.clone(), referrer_descriptor())),
+            )
+            .await
+            .expect_err("coupled persist must fail");
+
+            assert!(
+                reg.get_manifest("coupled/repo", &Reference::Digest(digest))
+                    .await
+                    .expect("get coupled")
+                    .is_none(),
+                "transactional method must NOT strand the manifest (R4-1)"
+            );
+            let referrers = reg
+                .list_referrers("coupled/repo", &subject, None)
+                .await
+                .expect("list referrers");
+            assert!(referrers.is_empty(), "referrer must not survive either");
+            // Only the unrelated seed repo remains.
+            let repos = reg.list_repositories(None, None).await.expect("repos");
+            assert_eq!(repos, vec!["seed/repo".to_owned()]);
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_first_put_to_new_repo_leaves_catalog_empty() {
+        // R4-2: a failed FIRST manifest PUT (no subject) to a brand-new repo
+        // must not leave an empty `manifests[name]` / `tags[name]` behind, so
+        // the repo is ABSENT from the catalog afterward.
+        let (reg, _tmp) = registry_with_failing_persist();
+        let body = Bytes::from_static(b"first-body");
+        let digest = Digest::sha256_of(&body);
+
+        reg.put_manifest(
+            "brand/new",
+            &Reference::Tag("v1".to_owned()),
+            &digest,
+            "application/vnd.oci.image.manifest.v1+json",
+            body,
+        )
+        .await
+        .expect_err("persist failure must surface");
+
+        let repos = reg.list_repositories(None, None).await.expect("repos");
+        assert!(
+            repos.is_empty(),
+            "failed first PUT must leave catalog empty, got {repos:?}"
+        );
+        let tags = reg.list_tags("brand/new", None, None).await.expect("tags");
+        assert!(tags.is_empty(), "no tags should survive");
+    }
+
+    #[tokio::test]
+    async fn failed_put_to_existing_repo_leaves_other_manifests_intact() {
+        // R4-2: rollback must prune only what it inserted. A failed PUT to a
+        // repo that already holds OTHER manifests must leave those intact.
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let first_body = Bytes::from_static(b"keep-me");
+        let first_digest = Digest::sha256_of(&first_body);
+
+        // First, a SUCCESSFUL publish to establish the repo + a manifest/tag.
+        // Keep this SAME registry instance for the failing second PUT so its
+        // in-memory state still holds the first manifest (a rebuild here would
+        // re-read the snapshot, which we are about to clobber below).
+        let reg = InMemoryRegistryMeta::with_persistence(tmp.path());
+        reg.put_manifest(
+            "shared/repo",
+            &Reference::Tag("stable".to_owned()),
+            &first_digest,
+            "application/vnd.oci.image.manifest.v1+json",
+            first_body.clone(),
+        )
+        .await
+        .expect("first publish");
+
+        // Now make subsequent persistence fail by turning metadata.json into a
+        // non-empty directory under the SAME storage dir: the atomic rename can
+        // no longer clobber it, so the next snapshot write returns Err.
+        let meta = tmp.path().join(super::METADATA_FILE_NAME);
+        std::fs::remove_file(&meta).expect("remove snapshot file");
+        std::fs::create_dir(&meta).expect("metadata.json as dir");
+        std::fs::write(meta.join("child"), b"x").expect("child");
+
+        let second_body = Bytes::from_static(b"drop-me");
+        let second_digest = Digest::sha256_of(&second_body);
+        reg.put_manifest(
+            "shared/repo",
+            &Reference::Tag("edge".to_owned()),
+            &second_digest,
+            "application/vnd.oci.image.manifest.v1+json",
+            second_body,
+        )
+        .await
+        .expect_err("second persist must fail");
+
+        // The pre-existing manifest/tag survive untouched.
+        assert!(
+            reg.get_manifest("shared/repo", &Reference::Digest(first_digest.clone()))
+                .await
+                .expect("get first")
+                .is_some(),
+            "pre-existing manifest must survive a sibling rollback"
+        );
+        assert!(
+            reg.get_manifest("shared/repo", &Reference::Tag("stable".to_owned()))
+                .await
+                .expect("get stable tag")
+                .is_some(),
+            "pre-existing tag must survive"
+        );
+        // The rolled-back manifest/tag are gone.
+        assert!(
+            reg.get_manifest("shared/repo", &Reference::Digest(second_digest))
+                .await
+                .expect("get second")
+                .is_none(),
+            "rolled-back manifest must be absent"
+        );
+        assert!(
+            reg.get_manifest("shared/repo", &Reference::Tag("edge".to_owned()))
+                .await
+                .expect("get edge tag")
+                .is_none(),
+            "rolled-back tag must be absent"
+        );
+        // The repo itself stays in the catalog (it still has the first one).
+        let repos = reg.list_repositories(None, None).await.expect("repos");
+        assert_eq!(repos, vec!["shared/repo".to_owned()]);
     }
 
     #[tokio::test]
