@@ -73,7 +73,7 @@ const MAX_BRACKET_DEPTH: usize = 32;
 /// astral-sh/ruff PR #24810 ("Parser recursion limit",
 /// <https://github.com/astral-sh/ruff/pull/24810>, OPEN as of
 /// 2026-05-09) introduces a `max_recursion_depth` parameter on the
-/// parser (default 202, matching CPython's `MAXSTACK`) that wraps every
+/// parser (default 202, matching `CPython`'s `MAXSTACK`) that wraps every
 /// recursive expression / statement / pattern entry — including the
 /// `parse_lhs_expression` site that this `MAX_UNARY_OP_RUN` cap exists
 /// to defend against. Once that PR merges and lands in a
