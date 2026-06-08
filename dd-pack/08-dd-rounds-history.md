@@ -48,4 +48,52 @@ Confirmed-fixed: F2, F3, F4, F5, F9. Residual: F1 (partial), F6, F7, F8.
 | R2-8 | P2 | cargo `handlers.rs:209` | publish writes tarball before collision/duplicate checks → orphan blobs on rejected publish | fixing |
 | R2-9 | P2 | cargo `serve.rs:160` | default `config.json` advertises `http://0.0.0.0:8081` (wildcard / port-0 unusable by remote clients) | fixing |
 
-_Round 3 (verification) pending after R2 fixes land._
+All 9 fixed (oci `c290144`/`d67ef2b`/`c8f9404`/`3f68337`/`d725481`/`5ccb00a`/`b03bdf1`; cargo `f2d82b5`/`eaafdbd`/`b42b8c9`/`b4fd33b`/`c49e764`; maven via shared helper). The R2 fixes introduced **durable metadata persistence** for both server binaries (previously in-memory only) — a new feature that closed the data-loss-on-restart gap but opened a new trust boundary reviewed in R3+.
+
+## Round 3 (2026-06-08) — verify R2 + scan new persistence code
+
+**PART A: 6 confirmed, 3 residual. PART B: 5 new. ACTIONABLE: P0=0, P1=2, P2=3.** All fixed.
+
+| # | Sev | Finding | Closure |
+|---|-----|---------|---------|
+| R3-1 | P1 | oci `metadata.json` load trusted digest key without recomputing → crafted snapshot serves arbitrary bytes under a digest | `b03bdf1` recompute sha256 on load, drop mismatched entries |
+| R3-2 | P1 | persistence failures swallowed → acknowledged mutations lost on restart (oci+cargo) | `b03bdf1`+`c49e764` persist returns Result; handlers roll back in-memory (+delete orphan blob) and return 500 |
+| R3-3 | P2 | concurrent same-digest upload overcounts `storage_blobs` gauge | `921b35f` serialize contains→put→inc under a mutex |
+| R3-4 | P2 | cargo load kept invalid-cksum entries (undownloadable, blocks republish) | `8c7991c` drop corrupt versions on load |
+| R3-5 | P2 | snapshot temp write not crash-durable + symlink-unsafe | `b03bdf1`+`75bea2a` O_EXCL unique temp + sync_all + rename + parent-dir fsync |
+
+## Round 4 (2026-06-08) — verify R3 + final pass on rollback/durability
+
+**PART A: 4 confirmed, 1 residual. PART B: 3. ACTIONABLE: P0=0, P1=2, P2=1.** All fixed.
+
+| # | Sev | Finding | Closure |
+|---|-----|---------|---------|
+| R4-1 | P1 | oci manifest+tag persisted separately from referrer → partial state if 2nd persist fails | `5d184f9` single `put_manifest_with_referrer` transaction (one lock, one snapshot, full rollback) |
+| R4-2 | P2 | manifest-PUT rollback left empty repo/tag maps (repo appears in catalog) | `5d184f9` prune empty maps on rollback |
+| R4-3 | P1 | cargo publish-rollback orphan-delete TOCTOU (concurrent identical publish → deletes referenced blob) | `892ac54` hold index write lock across reference-check + blob delete |
+
+## Round 5 (2026-06-08) — final GA-gate sweep
+
+**PART A: 3 confirmed, 0 residual. PART B: 3 (the wide sweep generalized known patterns to maven). ACTIONABLE: P0=0, P1=1, P2=2.** All fixed.
+
+| # | Sev | Finding | Closure |
+|---|-----|---------|---------|
+| R5-1 | P1 | maven `handle_delete` had the SAME check-delete TOCTOU as cargo R4-3 | `8486e56` hold layout write guard across remove + ref-scan + delete |
+| R5-2 | P2 | maven PUT used implicit Axum 2 MiB default body limit | `8989133` explicit 256 MiB `DefaultBodyLimit` |
+| R5-3 | P2 | oci `delete_manifest` left dangling referrer descriptors | `0db4838` prune matching descriptors (all subjects) under delete transaction + rollback |
+
+## Round 6 (2026-06-08) — convergence verification
+
+Wide sweep confirming the recurring patterns (check-delete TOCTOU, missing body limit, non-atomic persist, content-addressing on load) are closed across all 6 crates. _Verdict recorded on completion._
+
+## Convergence summary
+
+| Round | Findings | P1 | P2 |
+|-------|----------|----|----|
+| R1 | 9 | 5 | 4 |
+| R2 | 9 | 3 | 6 |
+| R3 | 5 | 2 | 3 |
+| R4 | 3 | 2 | 1 |
+| R5 | 3 | 1 | 2 |
+
+Monotonically converging. Every finding closed with a review→failing-test→fix regression test (each fix verified to fail before / pass after). 29 findings total across 5 rounds, 0 left open at R5. The DD process found real shipped bugs the original extracted crates carried (digest-verification bypass, unbounded-upload DoS, missing body limits, mixed-case crate 404s, version-overwrite) plus every issue in the durability feature added mid-review.
