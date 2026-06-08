@@ -416,4 +416,50 @@ mod tests {
             "com/example/foo/1.0/foo-1.0-sources.jar"
         );
     }
+
+    #[test]
+    fn fuzz_crash_path_traversal_input_is_rejected() {
+        // Regression for the `parse_layout_path` fuzz crash
+        // (crash-b8d04a21..): bytes `\x17/../\x00//..-\x00.t`. The path
+        // contained a `..` version/artifact component plus NUL bytes that
+        // previously slipped through `Coordinate::new` validation and let
+        // `repository_path` re-render a `..` traversal segment — a
+        // path-traversal security bug for the Maven repository layout.
+        let crash = "\u{17}/../\u{0}//..-\u{0}.t";
+        parse_layout_path(crash).expect_err("traversal crash input must be rejected");
+    }
+
+    #[test]
+    fn dotdot_component_path_is_rejected() {
+        // A clean `..` groupId / artifactId / version component must be
+        // rejected so a re-rendered path cannot escape the repo root.
+        for path in [
+            "../foo/1.0/foo-1.0.jar",
+            "g/../1.0/foo-1.0.jar",
+            "g/foo/../foo-1.0.jar",
+        ] {
+            parse_layout_path(path).expect_err("`..` component path must be rejected");
+        }
+    }
+
+    #[test]
+    fn accepted_paths_never_render_a_traversal_segment() {
+        // The invariant the fuzzer enforces: for every accepted artifact
+        // or checksum path, the re-rendered repository path contains no
+        // `..` (or `.`) traversal segment.
+        for path in [
+            "com/example/foo/1.0/foo-1.0.jar",
+            "com/example/foo/1.0/foo-1.0-sources.jar",
+            "com/example/foo/1.0/foo-1.0.jar.sha1",
+            "com/example/foo/1.0-SNAPSHOT/foo-1.0-SNAPSHOT-dist.tar.gz",
+        ] {
+            let p = parse_layout_path(path).expect("ok");
+            if matches!(p.class, PathClass::Artifact | PathClass::Checksum(_)) {
+                for seg in p.coordinate.repository_path().split('/') {
+                    assert_ne!(seg, "..", "traversal segment in {path}");
+                    assert_ne!(seg, ".", "current-dir segment in {path}");
+                }
+            }
+        }
+    }
 }
