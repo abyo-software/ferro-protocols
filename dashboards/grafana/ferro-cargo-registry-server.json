@@ -1,0 +1,153 @@
+{
+  "title": "ferro-cargo-registry-server — Cargo Registry Overview",
+  "uid": "ferro-cargo-registry-server-overview",
+  "tags": ["ferro-cargo-registry-server", "cargo", "registry"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "description": "ROADMAP — ferro-cargo-registry-server does not yet emit Prometheus metrics. Panels below reference the INTENDED metric names (ferrocargo_*); they render empty until the server ships a /metrics endpoint and the ServiceMonitor in charts/ferro-cargo-registry-server is enabled.",
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": { "text": "Prometheus", "value": "Prometheus" }
+      },
+      {
+        "name": "instance",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "$datasource" },
+        "query": "label_values(ferrocargo_build_info, instance)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "current": { "text": "All", "value": "$__all" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Request rate",
+      "description": "Total HTTP requests per second across sparse index + publish API (ferrocargo_http_requests_total).",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "targets": [
+        { "expr": "sum(rate(ferrocargo_http_requests_total{instance=~\"$instance\"}[5m]))", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps" } }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Error ratio (5xx)",
+      "description": "Fraction of responses with a 5xx status over the window.",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "targets": [
+        { "expr": "sum(rate(ferrocargo_http_requests_total{instance=~\"$instance\", status=~\"5..\"}[5m])) / clamp_min(sum(rate(ferrocargo_http_requests_total{instance=~\"$instance\"}[5m])), 1)", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 0.01 }, { "color": "red", "value": 0.05 } ] }
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Registry store size",
+      "description": "Total bytes stored across the sparse index + crate blobs (ferrocargo_storage_bytes).",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "targets": [
+        { "expr": "sum(ferrocargo_storage_bytes{instance=~\"$instance\"})", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes", "color": { "mode": "fixed", "fixedColor": "blue" } } }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Crates hosted",
+      "description": "Distinct crate versions in the index (ferrocargo_crate_versions).",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "targets": [
+        { "expr": "max(ferrocargo_crate_versions{instance=~\"$instance\"})", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "color": { "mode": "fixed", "fixedColor": "purple" } } }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Request latency — p50 / p95 / p99",
+      "description": "Histogram quantiles of request duration from ferrocargo_http_request_duration_seconds_bucket. Publish (PUT crates/new) dominates the p99 tail.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum by (le) (rate(ferrocargo_http_request_duration_seconds_bucket{instance=~\"$instance\"}[5m])))", "refId": "A", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.95, sum by (le) (rate(ferrocargo_http_request_duration_seconds_bucket{instance=~\"$instance\"}[5m])))", "refId": "B", "legendFormat": "p95" },
+        { "expr": "histogram_quantile(0.99, sum by (le) (rate(ferrocargo_http_request_duration_seconds_bucket{instance=~\"$instance\"}[5m])))", "refId": "C", "legendFormat": "p99" }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Response rate by status class",
+      "description": "Requests per second split by 2xx / 4xx / 5xx. 4xx includes not-yet-published crate lookups + auth failures on publish; 5xx is the alerting signal.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
+      "targets": [
+        { "expr": "sum(rate(ferrocargo_http_requests_total{instance=~\"$instance\", status=~\"2..\"}[5m]))", "refId": "A", "legendFormat": "2xx" },
+        { "expr": "sum(rate(ferrocargo_http_requests_total{instance=~\"$instance\", status=~\"4..\"}[5m]))", "refId": "B", "legendFormat": "4xx" },
+        { "expr": "sum(rate(ferrocargo_http_requests_total{instance=~\"$instance\", status=~\"5..\"}[5m]))", "refId": "C", "legendFormat": "5xx" }
+      ]
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "Request rate by endpoint",
+      "description": "Per-route request rate (ferrocargo_http_requests_total by handler) — sparse index fetch, crate download, publish (crates/new), yank/unyank, config.json.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
+      "targets": [
+        { "expr": "sum by (handler) (rate(ferrocargo_http_requests_total{instance=~\"$instance\"}[5m]))", "refId": "A", "legendFormat": "{{handler}}" }
+      ]
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Publish & download throughput",
+      "description": "Bytes/sec moved through crate publish (ingress) and download (egress) paths (ferrocargo_crate_bytes_total by direction).",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "fieldConfig": { "defaults": { "unit": "Bps" } },
+      "targets": [
+        { "expr": "sum(rate(ferrocargo_crate_bytes_total{instance=~\"$instance\", direction=\"download\"}[5m]))", "refId": "A", "legendFormat": "download (egress)" },
+        { "expr": "sum(rate(ferrocargo_crate_bytes_total{instance=~\"$instance\", direction=\"publish\"}[5m]))", "refId": "B", "legendFormat": "publish (ingress)" }
+      ]
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "Publish rate",
+      "description": "Successful crate publishes per minute (ferrocargo_crate_publish_total). The failures line tracks rejected publishes (duplicate version, bad manifest, auth).",
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "fieldConfig": { "defaults": { "unit": "cpm" } },
+      "targets": [
+        { "expr": "sum(rate(ferrocargo_crate_publish_total{instance=~\"$instance\", result=\"ok\"}[5m])) * 60", "refId": "A", "legendFormat": "published" },
+        { "expr": "sum(rate(ferrocargo_crate_publish_total{instance=~\"$instance\", result=\"error\"}[5m])) * 60", "refId": "B", "legendFormat": "failures" }
+      ]
+    }
+  ]
+}

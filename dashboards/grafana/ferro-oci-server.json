@@ -1,0 +1,152 @@
+{
+  "title": "ferro-oci-server — OCI Registry Overview",
+  "uid": "ferro-oci-server-overview",
+  "tags": ["ferro-oci-server", "oci", "registry"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "description": "ROADMAP — ferro-oci-server does not yet emit Prometheus metrics. Panels below reference the INTENDED metric names (ferrooci_*); they render empty until the server ships a /metrics endpoint and the ServiceMonitor in charts/ferro-oci-server is enabled.",
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": { "text": "Prometheus", "value": "Prometheus" }
+      },
+      {
+        "name": "instance",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "$datasource" },
+        "query": "label_values(ferrooci_build_info, instance)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "current": { "text": "All", "value": "$__all" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Request rate",
+      "description": "Total HTTP requests per second across all /v2/ endpoints (ferrooci_http_requests_total).",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "targets": [
+        { "expr": "sum(rate(ferrooci_http_requests_total{instance=~\"$instance\"}[5m]))", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps" } }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Error ratio (5xx)",
+      "description": "Fraction of responses with a 5xx status over the window.",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "targets": [
+        { "expr": "sum(rate(ferrooci_http_requests_total{instance=~\"$instance\", status=~\"5..\"}[5m])) / clamp_min(sum(rate(ferrooci_http_requests_total{instance=~\"$instance\"}[5m])), 1)", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 0.01 }, { "color": "red", "value": 0.05 } ] }
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Blob store size",
+      "description": "Total bytes stored in the blob store (ferrooci_storage_bytes).",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "targets": [
+        { "expr": "sum(ferrooci_storage_bytes{instance=~\"$instance\"})", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes", "color": { "mode": "fixed", "fixedColor": "blue" } } }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Build",
+      "description": "Version label from ferrooci_build_info.",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "targets": [
+        { "expr": "ferrooci_build_info{instance=~\"$instance\"}", "format": "table", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "color": { "mode": "fixed", "fixedColor": "blue" } } }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Request latency — p50 / p95 / p99",
+      "description": "Histogram quantiles of request duration from ferrooci_http_request_duration_seconds_bucket. Watch p99 for blob-transfer tail latency.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum by (le) (rate(ferrooci_http_request_duration_seconds_bucket{instance=~\"$instance\"}[5m])))", "refId": "A", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.95, sum by (le) (rate(ferrooci_http_request_duration_seconds_bucket{instance=~\"$instance\"}[5m])))", "refId": "B", "legendFormat": "p95" },
+        { "expr": "histogram_quantile(0.99, sum by (le) (rate(ferrooci_http_request_duration_seconds_bucket{instance=~\"$instance\"}[5m])))", "refId": "C", "legendFormat": "p99" }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Response rate by status class",
+      "description": "Requests per second split by 2xx / 4xx / 5xx. The 4xx line is mostly auth challenges + not-found manifests; 5xx is the alerting signal.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
+      "targets": [
+        { "expr": "sum(rate(ferrooci_http_requests_total{instance=~\"$instance\", status=~\"2..\"}[5m]))", "refId": "A", "legendFormat": "2xx" },
+        { "expr": "sum(rate(ferrooci_http_requests_total{instance=~\"$instance\", status=~\"4..\"}[5m]))", "refId": "B", "legendFormat": "4xx" },
+        { "expr": "sum(rate(ferrooci_http_requests_total{instance=~\"$instance\", status=~\"5..\"}[5m]))", "refId": "C", "legendFormat": "5xx" }
+      ]
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "Request rate by endpoint",
+      "description": "Per-route request rate (ferrooci_http_requests_total by handler) — blob GET/PUT, manifest GET/PUT, upload, tags, catalog, referrers.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
+      "targets": [
+        { "expr": "sum by (handler) (rate(ferrooci_http_requests_total{instance=~\"$instance\"}[5m]))", "refId": "A", "legendFormat": "{{handler}}" }
+      ]
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Blob transfer throughput",
+      "description": "Bytes/sec moved through blob pull (egress) and push (ingress) paths (ferrooci_blob_bytes_total by direction).",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "fieldConfig": { "defaults": { "unit": "Bps" } },
+      "targets": [
+        { "expr": "sum(rate(ferrooci_blob_bytes_total{instance=~\"$instance\", direction=\"pull\"}[5m]))", "refId": "A", "legendFormat": "pull (egress)" },
+        { "expr": "sum(rate(ferrooci_blob_bytes_total{instance=~\"$instance\", direction=\"push\"}[5m]))", "refId": "B", "legendFormat": "push (ingress)" }
+      ]
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "In-flight blob uploads",
+      "description": "Resumable upload sessions currently open (ferrooci_uploads_in_flight). A climbing line with no completion indicates stuck or abandoned PATCH chains.",
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "fieldConfig": { "defaults": { "min": 0 } },
+      "targets": [
+        { "expr": "sum(ferrooci_uploads_in_flight{instance=~\"$instance\"})", "refId": "A", "legendFormat": "in-flight uploads" }
+      ]
+    }
+  ]
+}
