@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::routing::get;
 use ferro_blob_store::BlobStore;
 use tokio::sync::RwLock;
@@ -72,10 +73,33 @@ impl MavenState {
     }
 }
 
+/// Maximum accepted size, in bytes, of a Maven artifact `PUT` body
+/// (256 MiB).
+///
+/// R5-2: Axum's [`DefaultBodyLimit`] is 2 MiB, which silently rejects
+/// (`413 Payload Too Large`) any artifact larger than that — and real
+/// Maven artifacts (fat/uber JARs, WARs, EARs, native bundles) routinely
+/// exceed 2 MiB. Without an explicit limit, `mvn deploy` of such an
+/// artifact fails unless the embedder happens to override the default.
+///
+/// 256 MiB is a Maven-appropriate cap: it comfortably covers the vast
+/// majority of published artifacts (Maven Central's own per-file ceiling
+/// is well under this) while still bounding memory, since [`handle_put`]
+/// buffers the whole body as [`bytes::Bytes`]. It sits between the
+/// cargo registry's 20 MiB tarball cap and the OCI server's 512 MiB blob
+/// cap, reflecting that Maven artifacts are larger than crate tarballs
+/// but smaller than container image layers.
+///
+/// [`handle_put`]: crate::handlers::handle_put
+pub const MAX_ARTIFACT_BODY_BYTES: usize = 256 * 1024 * 1024;
+
 /// Build the Maven Axum router.
 ///
 /// Routes all HTTP verbs on `/repository/{repo}/{*path}` to the
 /// appropriate handler.
+///
+/// The `PUT` body limit is raised to [`MAX_ARTIFACT_BODY_BYTES`] above
+/// Axum's 2 MiB default so normal Maven artifacts are accepted.
 pub fn router(state: MavenState) -> Router {
     Router::new()
         .route(
@@ -85,5 +109,6 @@ pub fn router(state: MavenState) -> Router {
                 .put(handle_put)
                 .delete(handle_delete),
         )
+        .layer(DefaultBodyLimit::max(MAX_ARTIFACT_BODY_BYTES))
         .with_state(state)
 }

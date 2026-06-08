@@ -50,7 +50,7 @@ pub use snapshot::{SnapshotTimestamp, is_snapshot_version};
 
 #[cfg(feature = "http")]
 #[cfg_attr(docsrs, doc(cfg(feature = "http")))]
-pub use router::{MavenState, router};
+pub use router::{MAX_ARTIFACT_BODY_BYTES, MavenState, router};
 
 /// Crate name, exposed for diagnostics and `/metrics` labelling.
 pub const CRATE_NAME: &str = "ferro-maven-layout";
