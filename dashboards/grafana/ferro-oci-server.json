@@ -7,7 +7,7 @@
   "version": 1,
   "refresh": "30s",
   "time": { "from": "now-1h", "to": "now" },
-  "description": "ROADMAP — ferro-oci-server does not yet emit Prometheus metrics. Panels below reference the INTENDED metric names (ferrooci_*); they render empty until the server ships a /metrics endpoint and the ServiceMonitor in charts/ferro-oci-server is enabled.",
+  "description": "ferro-oci-server exposes Prometheus metrics at /metrics (enabled via the ServiceMonitor in charts/ferro-oci-server). Live panels: request rate, status-class split, p50/p95/p99 latency, per-handler rate, blob count. Note: ferrooci_storage_bytes and ferrooci_blob_bytes_total are registered but read 0 — the BlobStore backend does not report byte sizes yet; ferrooci_storage_blobs (exact blob count) is the signal to trust today.",
   "templating": {
     "list": [
       {
@@ -62,14 +62,14 @@
     {
       "id": 3,
       "type": "stat",
-      "title": "Blob store size",
-      "description": "Total bytes stored in the blob store (ferrooci_storage_bytes).",
+      "title": "Blobs stored",
+      "description": "Distinct blobs held in the blob store (ferrooci_storage_blobs — exact count). ferrooci_storage_bytes is registered but reads 0 until a size-reporting backend is wired.",
       "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "$datasource" },
       "targets": [
-        { "expr": "sum(ferrooci_storage_bytes{instance=~\"$instance\"})", "refId": "A" }
+        { "expr": "max(ferrooci_storage_blobs{instance=~\"$instance\"})", "refId": "A" }
       ],
-      "fieldConfig": { "defaults": { "unit": "bytes", "color": { "mode": "fixed", "fixedColor": "blue" } } }
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "fixed", "fixedColor": "blue" } } }
     },
     {
       "id": 4,
@@ -127,7 +127,7 @@
       "id": 21,
       "type": "timeseries",
       "title": "Blob transfer throughput",
-      "description": "Bytes/sec moved through blob pull (egress) and push (ingress) paths (ferrooci_blob_bytes_total by direction).",
+      "description": "Bytes/sec moved through blob pull (egress) and push (ingress) paths (ferrooci_blob_bytes_total by direction). NOT YET EMITTED — byte-level blob accounting is not wired; this panel renders empty until ferrooci_blob_bytes_total is added.",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
       "datasource": { "type": "prometheus", "uid": "$datasource" },
       "fieldConfig": { "defaults": { "unit": "Bps" } },
@@ -139,8 +139,8 @@
     {
       "id": 22,
       "type": "timeseries",
-      "title": "In-flight blob uploads",
-      "description": "Resumable upload sessions currently open (ferrooci_uploads_in_flight). A climbing line with no completion indicates stuck or abandoned PATCH chains.",
+      "title": "In-flight requests",
+      "description": "HTTP requests currently being served (ferrooci_uploads_in_flight). This counts all in-flight requests, not only upload sessions; a sustained climb with no drain indicates slow or stuck handlers (often long blob PATCH chains).",
       "gridPos": { "h": 6, "w": 24, "x": 0, "y": 20 },
       "datasource": { "type": "prometheus", "uid": "$datasource" },
       "fieldConfig": { "defaults": { "min": 0 } },

@@ -7,7 +7,7 @@
   "version": 1,
   "refresh": "30s",
   "time": { "from": "now-1h", "to": "now" },
-  "description": "ROADMAP — ferro-cargo-registry-server does not yet emit Prometheus metrics. Panels below reference the INTENDED metric names (ferrocargo_*); they render empty until the server ships a /metrics endpoint and the ServiceMonitor in charts/ferro-cargo-registry-server is enabled.",
+  "description": "ferro-cargo-registry-server exposes Prometheus metrics at /metrics (enabled via the ServiceMonitor in charts/ferro-cargo-registry-server). Live panels: request rate, status-class split, p50/p95/p99 latency, per-handler rate, crate-name + crate-version counts. Note: ferrocargo_storage_bytes, ferrocargo_crate_bytes_total and ferrocargo_crate_publish_total are registered/intended but not yet emitted; ferrocargo_crates_total and ferrocargo_crate_versions (exact index counts) are the signals to trust today.",
   "templating": {
     "list": [
       {
@@ -62,20 +62,20 @@
     {
       "id": 3,
       "type": "stat",
-      "title": "Registry store size",
-      "description": "Total bytes stored across the sparse index + crate blobs (ferrocargo_storage_bytes).",
+      "title": "Crates hosted (names)",
+      "description": "Distinct crate names in the index (ferrocargo_crates_total — exact count). ferrocargo_storage_bytes is registered but reads 0 until a size-reporting backend is wired.",
       "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "$datasource" },
       "targets": [
-        { "expr": "sum(ferrocargo_storage_bytes{instance=~\"$instance\"})", "refId": "A" }
+        { "expr": "max(ferrocargo_crates_total{instance=~\"$instance\"})", "refId": "A" }
       ],
-      "fieldConfig": { "defaults": { "unit": "bytes", "color": { "mode": "fixed", "fixedColor": "blue" } } }
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "fixed", "fixedColor": "blue" } } }
     },
     {
       "id": 4,
       "type": "stat",
-      "title": "Crates hosted",
-      "description": "Distinct crate versions in the index (ferrocargo_crate_versions).",
+      "title": "Crate versions",
+      "description": "Distinct crate versions in the index (ferrocargo_crate_versions — exact count).",
       "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "$datasource" },
       "targets": [
@@ -127,7 +127,7 @@
       "id": 21,
       "type": "timeseries",
       "title": "Publish & download throughput",
-      "description": "Bytes/sec moved through crate publish (ingress) and download (egress) paths (ferrocargo_crate_bytes_total by direction).",
+      "description": "Bytes/sec moved through crate publish (ingress) and download (egress) paths (ferrocargo_crate_bytes_total by direction). NOT YET EMITTED — byte-level crate accounting is not wired; this panel renders empty until ferrocargo_crate_bytes_total is added.",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
       "datasource": { "type": "prometheus", "uid": "$datasource" },
       "fieldConfig": { "defaults": { "unit": "Bps" } },
@@ -140,7 +140,7 @@
       "id": 22,
       "type": "timeseries",
       "title": "Publish rate",
-      "description": "Successful crate publishes per minute (ferrocargo_crate_publish_total). The failures line tracks rejected publishes (duplicate version, bad manifest, auth).",
+      "description": "Successful crate publishes per minute (ferrocargo_crate_publish_total). NOT YET EMITTED as a dedicated publish counter — until ferrocargo_crate_publish_total is wired, track publish traffic via ferrocargo_http_requests_total{handler=\"publish\"} on the per-endpoint panel above.",
       "gridPos": { "h": 6, "w": 24, "x": 0, "y": 20 },
       "datasource": { "type": "prometheus", "uid": "$datasource" },
       "fieldConfig": { "defaults": { "unit": "cpm" } },
