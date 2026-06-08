@@ -9,6 +9,25 @@ releases. Breaking changes will be released as a separate `v0.2.0`.
 ## [Unreleased]
 
 ### Added
+- **Runnable `ferro-oci-server` binary** (`src/bin/ferro-oci-server.rs`).
+  Boots the Axum `router` over a filesystem-backed (`FERRO_OCI_STORAGE_DIR`)
+  or in-memory blob store and the in-memory metadata plane, binds a
+  configurable `host:port` (`FERRO_OCI_LISTEN`, default `0.0.0.0:8080`),
+  and shuts down gracefully on `SIGTERM`/`SIGINT`. Environment-driven
+  `Config`.
+- **Kubernetes health-probe routes** — new `probe_routes()` router and
+  `AppState::new` constructor. `GET /live` and `GET /ready` return
+  `200 OK` with body `OK`; `GET /healthz` returns `200 OK` with JSON
+  `{"status":"ok"}`. Merge into the OCI router with
+  `router(state).merge(probe_routes())`.
+- **OCI Distribution Spec v1.1 conformance harness**
+  (`tests/conformance/run_conformance.sh` + `RESULTS.md`). Builds and
+  boots the server, runs the official
+  `opencontainers/distribution-spec` conformance suite (Go toolchain
+  *or* prebuilt Docker image) against it across all four workflow
+  categories, and records the real pass count. **Latest run: 75/75
+  specs pass (Push, Pull, Content Discovery, Content Management), 0
+  failures.** Generated reports under `report/` are git-ignored.
 - `tests/fixtures/` — vendored canonical OCI Image Spec v1.1 examples
   (`oci-image-manifest.json`, `oci-image-index.json`) sourced from
   `opencontainers/image-spec` (Apache-2.0).
@@ -17,6 +36,23 @@ releases. Breaking changes will be released as a separate `v0.2.0`.
   asserting round-trip stability and media-type classification. Closes
   the v0.1.0 "vendor real-protocol fixtures" gate that was deferred to
   the 0.1.x minor track in the 0.0.1 → 0.1.0 promotion notes.
+
+### Fixed
+- **Image-index push now accepts registered child manifests.**
+  `PUT` of an `application/vnd.oci.image.index.v1+json` whose
+  `manifests[]` reference child manifests that live in the metadata
+  plane (the normal push flow — children pushed before the index) was
+  rejected with `404 MANIFEST_BLOB_UNKNOWN` because validation only
+  consulted the blob store. It now accepts a child digest that resolves
+  as a registered manifest *or* a stored blob. Caught by the upstream
+  conformance Content-Discovery "References setup" step.
+- **Referrers `artifactType` filter honours the `config.mediaType`
+  fallback.** Per OCI Image Spec v1.1, a referrer manifest with no
+  top-level `artifactType` derives it from `config.mediaType`. The
+  referrer descriptor now records this fallback so
+  `GET /referrers/{digest}?artifactType=<config media type>` returns
+  the correct set. Caught by the conformance Content-Discovery filter
+  test.
 
 ## [0.1.0] — 2026-05-04
 

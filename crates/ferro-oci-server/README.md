@@ -4,13 +4,23 @@
 [![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](../../LICENSE)
 [![crates.io](https://img.shields.io/crates/v/ferro-oci-server.svg)](https://crates.io/crates/ferro-oci-server)
 [![docs.rs](https://docs.rs/ferro-oci-server/badge.svg)](https://docs.rs/ferro-oci-server)
+[![CI](https://github.com/abyo-software/ferro-protocols/actions/workflows/ci.yml/badge.svg)](https://github.com/abyo-software/ferro-protocols/actions/workflows/ci.yml)
 [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](../../rust-toolchain.toml)
+[![OCI Distribution Spec v1.1](https://img.shields.io/badge/OCI%20Distribution%20Spec-v1.1-blue.svg)](https://github.com/opencontainers/distribution-spec/blob/v1.1.0/spec.md)
 
 **Embeddable** server-side primitives for the
-[OCI Distribution Specification v1.1](https://github.com/opencontainers/distribution-spec).
+[OCI Distribution Specification v1.1](https://github.com/opencontainers/distribution-spec/blob/v1.1.0/spec.md).
 Manifest / Blob / Tag / Referrers handlers as an Axum router, a
 chunked-upload state machine, the spec §6.2 error envelope, and a
-metadata-plane trait that keeps the storage layer abstract.
+metadata-plane trait that keeps the storage layer abstract — plus a
+ready-to-run `ferro-oci-server` binary with Kubernetes health probes.
+
+> ✅ **Passes the official OCI Distribution Spec v1.1 conformance suite:
+> 75/75 specs (Push, Pull, Content Discovery, Content Management).**
+> See [`tests/conformance/RESULTS.md`](tests/conformance/RESULTS.md)
+> for the real run and
+> [`tests/conformance/run_conformance.sh`](tests/conformance/run_conformance.sh)
+> to reproduce.
 
 > The Rust ecosystem has had [`oci-client`](https://crates.io/crates/oci-client)
 > (formerly `oci-distribution`) and [`oci-spec`](https://crates.io/crates/oci-spec)
@@ -67,24 +77,49 @@ Rust artifact repository.
 - **Sigstore / SLSA / TUF / cosign** — the OCI server stores and
   serves manifests but does not sign or verify. Those live in
   separate crates (not yet published).
-- **Conformance suite vendoring** — `tests/conformance_smoke.rs`
-  exercises the request paths end-to-end, but the upstream
-  `opencontainers/distribution-spec` conformance harness is not
-  yet wired in. Doing so is the gate for `v0.1.0`.
 
-## Quick start
+## Run the server
+
+A ready-to-run binary ships with the crate. It is configured entirely
+through the environment:
+
+| Variable                | Default        | Meaning                                          |
+|-------------------------|----------------|--------------------------------------------------|
+| `FERRO_OCI_LISTEN`      | `0.0.0.0:8080` | `host:port` to bind                              |
+| `FERRO_OCI_STORAGE_DIR` | *(in-memory)*  | filesystem dir for blob bytes; unset → RAM       |
+| `RUST_LOG`              | `info`         | `tracing-subscriber` env filter                  |
+
+```bash
+FERRO_OCI_LISTEN=127.0.0.1:5000 \
+FERRO_OCI_STORAGE_DIR=/var/lib/oci-registry \
+  cargo run --bin ferro-oci-server -p ferro-oci-server
+
+curl -s localhost:5000/healthz   # {"status":"ok"}
+curl -s localhost:5000/v2/       # {}
+docker push localhost:5000/myimage:latest
+```
+
+It exposes Kubernetes-style probe endpoints alongside the `/v2/**`
+surface and shuts down gracefully on `SIGTERM`/`SIGINT`:
+
+- `GET /live`    — liveness (`200 OK`, body `OK`)
+- `GET /healthz` — health (`200 OK`, JSON `{"status":"ok"}`)
+- `GET /ready`   — readiness (`200 OK`, body `OK`)
+
+## Embed it in your own server
 
 ```rust,no_run
 use std::sync::Arc;
 use axum::Router;
 use ferro_blob_store::FsBlobStore;
-use ferro_oci_server::{router, AppState, registry::InMemoryRegistryMeta};
+use ferro_oci_server::{router, probe_routes, AppState, InMemoryRegistryMeta};
 
 # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 let store = Arc::new(FsBlobStore::new("/var/lib/oci-registry")?);
-let meta = Arc::new(InMemoryRegistryMeta::default());
+let meta = Arc::new(InMemoryRegistryMeta::new());
 let state = AppState::new(store, meta);
-let app: Router = router(state);
+// OCI `/v2/**` + Kubernetes health probes.
+let app: Router = router(state).merge(probe_routes());
 let listener = tokio::net::TcpListener::bind("0.0.0.0:5000").await?;
 axum::serve(listener, app).await?;
 # Ok(()) }
@@ -93,27 +128,27 @@ axum::serve(listener, app).await?;
 Then `docker push localhost:5000/myimage:latest` should work
 against the running server.
 
-## Roadmap to v0.1.0
+## Conformance
 
-The `v0.0.x` → `v0.1.0` promotion gate is one explicit milestone:
+The crate passes the official upstream
+[`opencontainers/distribution-spec` conformance test suite](https://github.com/opencontainers/distribution-spec/tree/main/conformance)
+end-to-end — **75/75 specs across all four workflow categories**
+(Push, Pull, Content Discovery, Content Management). The real run and
+its honest changelog (including the two server bugs the suite caught)
+are recorded in [`tests/conformance/RESULTS.md`](tests/conformance/RESULTS.md);
+[`tests/conformance/run_conformance.sh`](tests/conformance/run_conformance.sh)
+boots the server, runs the suite (Go toolchain or prebuilt Docker
+image), and writes a JUnit + HTML report, so you can reproduce it in
+CI or on a workstation.
 
-> The crate must pass the upstream
-> [`opencontainers/distribution-spec` conformance test suite](https://github.com/opencontainers/distribution-spec/tree/main/conformance)
-> end-to-end.
+In addition, `tests/conformance_smoke.rs` exercises the full
+in-process request walk for every endpoint pair (start upload →
+chunked PATCH → finalize PUT → blob HEAD/GET → manifest PUT-by-tag →
+manifest GET-by-digest → referrers GET → tag list → catalog → delete)
+and the error variants in spec §6.2.
 
-Today's coverage is **smoke-test grade**: `tests/conformance_smoke.rs`
-exercises the full request walk for every endpoint pair (start
-upload → chunked PATCH → finalize PUT → blob HEAD/GET → manifest
-PUT-by-tag → manifest GET-by-digest → referrers GET → tag list →
-catalog → delete) and the error path for the variants in spec §6.2.
-That gives confidence that the wire shape is right, but it is not
-the same as passing the official conformance harness.
-
-Vendoring the upstream Go-based conformance suite into the test
-matrix is tracked in
-[issue #1](https://github.com/abyo-software/ferro-protocols/issues/1).
 Persistent metadata backends (SQLite / Postgres) and an
-authentication trait are also gated against `v0.1.0`.
+authentication trait remain on the roadmap.
 
 ## Status
 
@@ -122,7 +157,8 @@ authentication trait are also gated against `v0.1.0`.
 | API stability | **beta** (`v0.1.x`) — additive-only between minors |
 | Manifest / blob / tag / catalog / referrers handlers | working |
 | Chunked uploads | working |
-| Conformance suite | smoke tests only — formal harness pending |
+| Runnable server binary + K8s probes (`/live`, `/healthz`, `/ready`) | working |
+| OCI v1.1 conformance suite | **75/75 specs pass** (all 4 workflows) |
 | Persistent metadata backend | in-memory only |
 | Authentication | scaffold — layer your own middleware |
 | MSRV | rustc **1.88** |
