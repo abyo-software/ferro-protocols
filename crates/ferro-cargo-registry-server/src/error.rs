@@ -50,6 +50,17 @@ pub enum CargoError {
         existing: String,
     },
 
+    /// A publish targets a `(name, version)` that already exists. Cargo
+    /// registry versions are immutable, so a re-publish is rejected; only
+    /// yank / unyank may mutate an existing index line.
+    #[error("crate version already exists: {name} {version}")]
+    DuplicateVersion {
+        /// The crate name being re-published.
+        name: String,
+        /// The version being re-published.
+        version: String,
+    },
+
     /// Feature not yet implemented in this phase (Git index).
     #[error("not implemented: {0}")]
     NotImplemented(String),
@@ -68,7 +79,7 @@ impl CargoError {
             | Self::InvalidVersion(_)
             | Self::InvalidPublish(_)
             | Self::ChecksumMismatch { .. } => StatusCode::BAD_REQUEST,
-            Self::NameConflict { .. } => StatusCode::CONFLICT,
+            Self::NameConflict { .. } | Self::DuplicateVersion { .. } => StatusCode::CONFLICT,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
             Self::Storage(err) => storage_status(err),
@@ -132,6 +143,15 @@ mod tests {
         let e = CargoError::NameConflict {
             requested: "foo_bar".into(),
             existing: "foo-bar".into(),
+        };
+        assert_eq!(e.status(), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn duplicate_version_is_409() {
+        let e = CargoError::DuplicateVersion {
+            name: "foo".into(),
+            version: "1.0.0".into(),
         };
         assert_eq!(e.status(), StatusCode::CONFLICT);
     }

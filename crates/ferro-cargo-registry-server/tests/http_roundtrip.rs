@@ -13,10 +13,22 @@ use tempfile::TempDir;
 use tower::ServiceExt;
 
 fn setup() -> (axum::Router, TempDir) {
+    let (app, _store, tmp) = setup_with_store();
+    (app, tmp)
+}
+
+/// Like [`setup`] but also returns the backing blob store so a test can
+/// assert on the on-disk blob count (R2-8 orphan-blob regression).
+fn setup_with_store() -> (axum::Router, Arc<FsBlobStore>, TempDir) {
     let tmp = TempDir::new().expect("tempdir");
     let store = Arc::new(FsBlobStore::new(tmp.path()).expect("blob store"));
-    let state = CargoState::new(store, "http://localhost");
-    (router(state), tmp)
+    let state = CargoState::new(store.clone(), "http://localhost");
+    (router(state), store, tmp)
+}
+
+async fn blob_count(store: &FsBlobStore) -> usize {
+    use ferro_blob_store::BlobStore;
+    store.list().await.expect("list blobs").len()
 }
 
 async fn send(app: &axum::Router, req: Request<Body>) -> axum::http::Response<Body> {
@@ -566,4 +578,157 @@ async fn sparse_index_honours_if_none_match() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = to_bytes(resp.into_body(), 4096).await.expect("body");
     assert!(!body.is_empty(), "200 must carry a body");
+}
+
+/// R2-5 regression: published versions are immutable. Publishing the
+/// SAME `(name, vers)` a second time — even with different tarball bytes
+/// — must be rejected with `409 Conflict`, and the first version's
+/// tarball + index `cksum` must be left untouched.
+#[tokio::test]
+async fn republishing_same_version_is_rejected_and_immutable() {
+    let (app, _tmp) = setup();
+
+    let first_tarball: &[u8] = b"original-bytes";
+    let resp = send(
+        &app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri("/api/v1/crates/new")
+            .body(Body::from(publish_body("foo", "1.0.0", first_tarball)))
+            .expect("build"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let first_cksum = sha256_hex(first_tarball);
+
+    // Second publish of the SAME version with DIFFERENT bytes → 409.
+    let second_tarball: &[u8] = b"tampered-replacement-bytes";
+    assert_ne!(first_tarball, second_tarball);
+    let resp = send(
+        &app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri("/api/v1/crates/new")
+            .body(Body::from(publish_body("foo", "1.0.0", second_tarball)))
+            .expect("build"),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::CONFLICT,
+        "re-publishing an existing version must be 409"
+    );
+
+    // The index line still carries the ORIGINAL checksum.
+    let resp = send(
+        &app,
+        Request::builder()
+            .method(Method::GET)
+            .uri("/index/3/f/foo")
+            .body(Body::empty())
+            .expect("build"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), 4096).await.expect("body");
+    let v: Value = serde_json::from_str(
+        std::str::from_utf8(&body).unwrap().lines().next().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(v["cksum"], first_cksum, "cksum must be the original");
+
+    // And the download still returns the ORIGINAL tarball bytes.
+    let resp = send(
+        &app,
+        Request::builder()
+            .method(Method::GET)
+            .uri("/api/v1/crates/foo/1.0.0/download")
+            .body(Body::empty())
+            .expect("build"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let got = to_bytes(resp.into_body(), 4096).await.expect("body");
+    assert_eq!(
+        got.as_ref(),
+        first_tarball,
+        "download must still serve the original tarball"
+    );
+}
+
+/// R2-8 regression: a publish rejected by the duplicate-version check
+/// must NOT leave an orphan blob behind. The handler validates before
+/// writing the tarball, so the rejected upload's bytes never reach the
+/// store.
+#[tokio::test]
+async fn rejected_duplicate_publish_leaves_no_orphan_blob() {
+    let (app, store, _tmp) = setup_with_store();
+
+    // First publish lands exactly one blob.
+    let resp = send(
+        &app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri("/api/v1/crates/new")
+            .body(Body::from(publish_body("foo", "1.0.0", b"original")))
+            .expect("build"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let after_first = blob_count(&store).await;
+    assert_eq!(after_first, 1, "first publish stores one blob");
+
+    // Duplicate-version publish with NEW bytes is rejected and must not
+    // add a blob to the store.
+    let resp = send(
+        &app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri("/api/v1/crates/new")
+            .body(Body::from(publish_body("foo", "1.0.0", b"different-bytes")))
+            .expect("build"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        blob_count(&store).await,
+        after_first,
+        "a rejected duplicate publish must not leave an orphan blob"
+    );
+}
+
+/// R2-8 regression: a publish rejected by the name-collision check
+/// (`foo_bar` vs `foo-bar`) likewise leaves no orphan blob.
+#[tokio::test]
+async fn rejected_name_collision_leaves_no_orphan_blob() {
+    let (app, store, _tmp) = setup_with_store();
+
+    let resp = send(
+        &app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri("/api/v1/crates/new")
+            .body(Body::from(publish_body("foo-bar", "1.0.0", b"a")))
+            .expect("build"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let after_first = blob_count(&store).await;
+
+    // Colliding name with brand-new tarball bytes → 409, no new blob.
+    let resp = send(
+        &app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri("/api/v1/crates/new")
+            .body(Body::from(publish_body("foo_bar", "1.0.0", b"collision-bytes")))
+            .expect("build"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        blob_count(&store).await,
+        after_first,
+        "a rejected name collision must not leave an orphan blob"
+    );
 }

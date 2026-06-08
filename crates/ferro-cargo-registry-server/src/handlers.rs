@@ -205,10 +205,8 @@ pub async fn handle_publish(
         });
     }
 
-    // Ingest.
-    let digest = Digest::sha256_of(&tarball);
-    state.blobs.put(&digest, tarball.clone()).await?;
-
+    // Coerce the manifest into a sparse-index entry up front — this is
+    // cheap validation and must precede any blob write (R2-8).
     let entry = entry_from_manifest(&manifest, computed)
         .map_err(|e| CargoError::InvalidPublish(format!("manifest coerce: {e}")))?;
 
@@ -217,31 +215,48 @@ pub async fn handle_publish(
     // lowercase sparse-index path cargo requests. The display case lives
     // in the IndexEntry `name`.
     let key = canonical_name(name);
+    let digest = Digest::sha256_of(&tarball);
 
+    // Hold the write lock across the whole ingest so collision and
+    // duplicate-version checks plus the blob write are serialized — this
+    // closes the TOCTOU window where two concurrent publishes of the same
+    // `(name, vers)` could both pass the check.
     let mut crates = state.crates.write().await;
-    // Reject a publish that collides with a *different* existing crate
-    // under cargo's case-insensitive / `-`-vs-`_` uniqueness rules. The
-    // canonical key already folds both, so any pre-existing record whose
-    // stored display name differs from this one is a true collision.
-    if let Some(existing) = crates.get(&key)
-        && let Some(existing_display) = existing.entries.first().map(|e| e.name.as_str())
-        && existing_display != name
-    {
-        let existing_owned = existing_display.to_owned();
-        drop(crates);
-        return Err(CargoError::NameConflict {
-            requested: name.to_owned(),
-            existing: existing_owned,
-        });
+
+    // R2-8: validate BEFORE writing the tarball blob, so a rejected
+    // publish never leaves an orphan blob on disk.
+    if let Some(existing) = crates.get(&key) {
+        // Reject a publish that collides with a *different* existing crate
+        // under cargo's case-insensitive / `-`-vs-`_` uniqueness rules.
+        if let Some(existing_display) = existing.entries.first().map(|e| e.name.as_str())
+            && existing_display != name
+        {
+            let existing_owned = existing_display.to_owned();
+            drop(crates);
+            return Err(CargoError::NameConflict {
+                requested: name.to_owned(),
+                existing: existing_owned,
+            });
+        }
+        // R2-5: published versions are immutable. Reject a re-publish of
+        // an already-present `(name, vers)` with 409 Conflict; only yank /
+        // unyank may mutate an existing index line.
+        if existing.entries.iter().any(|e| e.vers == entry.vers) {
+            drop(crates);
+            return Err(CargoError::DuplicateVersion {
+                name: name.to_owned(),
+                version: vers.to_owned(),
+            });
+        }
     }
+
+    // Validation passed — now persist the tarball blob and append the
+    // index entry. The blob put happens under the lock so the on-disk
+    // state and the in-memory index advance together.
+    state.blobs.put(&digest, tarball.clone()).await?;
     let record = crates.entry(key).or_insert_with(CrateRecord::default);
     record.tarballs.insert(entry.vers.clone(), digest.clone());
-    // Append or replace by (name, vers).
-    if let Some(existing) = record.entries.iter_mut().find(|e| e.vers == entry.vers) {
-        *existing = entry;
-    } else {
-        record.entries.push(entry);
-    }
+    record.entries.push(entry);
     drop(crates);
 
     debug!(crate_name = %name, version = %vers, "publish complete");
