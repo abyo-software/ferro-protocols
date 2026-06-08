@@ -11,16 +11,23 @@ use std::sync::Arc;
 
 use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode, header};
-use ferro_blob_store::FsBlobStore;
-use ferro_maven_layout::{MavenState, router};
+use ferro_blob_store::{BlobStore, Digest, FsBlobStore};
+use ferro_maven_layout::{MAX_ARTIFACT_BODY_BYTES, MavenState, router};
 use tempfile::TempDir;
 use tower::ServiceExt;
 
 fn setup() -> (axum::Router, TempDir) {
+    let (app, tmp, _store) = setup_with_store();
+    (app, tmp)
+}
+
+/// Like [`setup`] but also returns the backing blob store so a test can
+/// assert directly on blob presence (independent of the layout index).
+fn setup_with_store() -> (axum::Router, TempDir, Arc<FsBlobStore>) {
     let tmp = TempDir::new().expect("tempdir");
     let store = Arc::new(FsBlobStore::new(tmp.path()).unwrap());
-    let state = MavenState::new(store);
-    (router(state), tmp)
+    let state = MavenState::new(store.clone());
+    (router(state), tmp, store)
 }
 
 const POM_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -474,4 +481,133 @@ async fn delete_keeps_blob_shared_by_another_path() {
     assert_eq!(get_b.status(), StatusCode::OK, "shared blob was wrongly deleted");
     let got = to_bytes(get_b.into_body(), 1024).await.expect("body");
     assert_eq!(got.as_ref(), shared);
+}
+
+/// R5-1 invariant (data-loss race guard): when two Maven paths reference
+/// the same content-addressed digest, deleting one path must leave the
+/// blob on disk because the surviving path still references it. We assert
+/// on the blob store directly (not just via GET) so the invariant is
+/// pinned at the storage layer. Then, deleting the LAST reference removes
+/// the blob (no orphan leak).
+///
+/// `handle_delete` removes the layout entry, scans for remaining
+/// references, and deletes the blob under a single write guard so a
+/// concurrent identical PUT cannot insert a reference into the window
+/// between the scan and the delete. This test verifies the *invariant*
+/// the critical section protects; the bypass variant below proves the
+/// reference check is load-bearing.
+#[tokio::test]
+async fn delete_preserves_blob_while_other_path_references_digest() {
+    let (app, _tmp, store) = setup_with_store();
+    let shared: &'static [u8] = b"content-addressed-shared-payload";
+    let digest = Digest::sha256_of(shared);
+
+    let path_a = "/repository/r/com/example/foo/1.0/foo-1.0.jar";
+    let path_b = "/repository/r/com/example/bar/1.0/bar-1.0.jar";
+    put(&app, path_a, shared).await;
+    put(&app, path_b, shared).await;
+
+    // Both paths are content-addressed to the same digest, so exactly one
+    // blob exists on disk.
+    assert!(store.contains(&digest).await.expect("contains"));
+
+    // Delete A: B still references digest D → the blob MUST survive.
+    assert_eq!(del(&app, path_a).await.status(), StatusCode::NO_CONTENT);
+    assert!(
+        store.contains(&digest).await.expect("contains"),
+        "blob deleted while still referenced by another path (data loss)"
+    );
+
+    // B must still resolve to the surviving blob.
+    let get_b = get(&app, path_b).await;
+    assert_eq!(get_b.status(), StatusCode::OK, "surviving path no longer resolves");
+    let got = to_bytes(get_b.into_body(), 1024).await.expect("body");
+    assert_eq!(got.as_ref(), shared);
+
+    // Delete B: this is now the LAST reference → the blob MUST be removed
+    // (no orphan leak).
+    assert_eq!(del(&app, path_b).await.status(), StatusCode::NO_CONTENT);
+    assert!(
+        !store.contains(&digest).await.expect("contains"),
+        "orphan blob leaked after its last reference was deleted"
+    );
+}
+
+/// Proves the still-referenced reference check in `handle_delete` is
+/// load-bearing: a deliberately reference-blind delete (bypassing the
+/// scan) deletes the shared blob even though another path still points at
+/// it, which is exactly the data loss the real handler must prevent. This
+/// mirrors the invariant of
+/// `delete_preserves_blob_while_other_path_references_digest`; if that
+/// test passed for a *trivial* reason (e.g. two distinct blobs), this one
+/// would also pass, so seeing this fail-mode confirms the assertion is
+/// meaningful.
+#[tokio::test]
+async fn bypassing_reference_check_loses_shared_blob() {
+    let (app, _tmp, store) = setup_with_store();
+    let shared: &'static [u8] = b"content-addressed-shared-payload";
+    let digest = Digest::sha256_of(shared);
+
+    let path_a = "/repository/r/com/example/foo/1.0/foo-1.0.jar";
+    let path_b = "/repository/r/com/example/bar/1.0/bar-1.0.jar";
+    put(&app, path_a, shared).await;
+    put(&app, path_b, shared).await;
+    assert!(store.contains(&digest).await.expect("contains"));
+
+    // Simulate a delete that DROPS the reference check (the bug class):
+    // unconditionally delete the blob after removing one path. This is the
+    // bypass the real handler must NOT do.
+    store.delete(&digest).await.expect("delete");
+
+    // The shared blob is now gone even though path B still references it:
+    // a GET of the surviving path can no longer be served. This failure is
+    // what the reference check prevents, proving the guard is meaningful.
+    assert!(
+        !store.contains(&digest).await.expect("contains"),
+        "bypass test setup invalid: blob should be gone after reference-blind delete"
+    );
+    let get_b = get(&app, path_b).await;
+    assert_ne!(
+        get_b.status(),
+        StatusCode::OK,
+        "surviving path unexpectedly served — bypass did not lose the blob"
+    );
+}
+
+/// R5-2: a Maven artifact PUT larger than Axum's 2 MiB default body limit
+/// must succeed (the router installs `MAX_ARTIFACT_BODY_BYTES`). Without
+/// the explicit limit this body would be rejected with 413.
+#[tokio::test]
+async fn put_artifact_over_default_body_limit_succeeds() {
+    let (app, _tmp) = setup();
+
+    // 3 MiB: comfortably above the 2 MiB Axum default, well under the cap.
+    let big: Vec<u8> = vec![0x4du8; 3 * 1024 * 1024];
+    assert!(big.len() > 2 * 1024 * 1024, "body must exceed the 2 MiB default");
+    assert!(big.len() < MAX_ARTIFACT_BODY_BYTES, "body must stay under the cap");
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/repository/maven-releases/com/example/big/1.0/big-1.0.jar")
+                .body(Body::from(big.clone()))
+                .expect("build"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "large artifact PUT rejected (likely 413 from the 2 MiB default limit)"
+    );
+
+    // And it round-trips back out intact.
+    let get_resp = get(&app, "/repository/maven-releases/com/example/big/1.0/big-1.0.jar").await;
+    assert_eq!(get_resp.status(), StatusCode::OK);
+    let got = to_bytes(get_resp.into_body(), MAX_ARTIFACT_BODY_BYTES)
+        .await
+        .expect("body");
+    assert_eq!(got.len(), big.len());
 }

@@ -483,15 +483,31 @@ pub async fn handle_delete(
     AxumPath((repo, path)): AxumPath<(String, String)>,
 ) -> Result<Response, MavenError> {
     let key = build_key(&repo, &path);
-    let removed = state.layout.write().await.remove(&key);
-    if let Some(digest) = removed {
-        // Keep blob if referenced elsewhere; otherwise delete.
-        let still_referenced = state.layout.read().await.values().any(|d| d == &digest);
-        if !still_referenced {
-            state.blobs.delete(&digest).await?;
-        }
-        Ok((StatusCode::NO_CONTENT, "").into_response())
-    } else {
-        Err(MavenError::NotFound(path))
+
+    // R5-1: the layout entry removal, the "still referenced?" scan, and
+    // the blob delete MUST be one critical section under a single write
+    // guard. If we dropped the guard between the scan and the delete (the
+    // pre-fix behaviour), a concurrent PUT of identical content could
+    // insert a new layout reference to the same content-addressed digest
+    // after the "not referenced" check but before `blobs.delete()`,
+    // leaving the new Maven path pointing at a deleted blob (data loss).
+    //
+    // Holding the guard across the `blobs.delete().await` is safe: the
+    // blob-store delete is a self-contained filesystem op
+    // (`FsBlobStore::delete` = `remove_file`) that never re-acquires the
+    // layout lock, so it cannot deadlock against this guard.
+    let mut layout = state.layout.write().await;
+    let Some(digest) = layout.remove(&key) else {
+        // Release the guard before constructing the error response.
+        drop(layout);
+        return Err(MavenError::NotFound(path));
+    };
+    // Scan the already-held write guard (never a fresh read lock): no
+    // concurrent PUT can insert a reference into this window.
+    let still_referenced = layout.values().any(|d| d == &digest);
+    if !still_referenced {
+        state.blobs.delete(&digest).await?;
     }
+    drop(layout);
+    Ok((StatusCode::NO_CONTENT, "").into_response())
 }
