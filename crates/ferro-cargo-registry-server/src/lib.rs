@@ -83,7 +83,9 @@ pub use index::{
     render_lines,
 };
 pub use metrics::{Metrics, MetricsState, instrument, metrics_routes};
-pub use name::{MAX_NAME_LEN, index_path, is_valid_name, validate_name};
+pub use name::{
+    MAX_NAME_LEN, canonical_name, index_path, is_valid_name, names_collide, validate_name,
+};
 pub use owners::{Owner, OwnersMutationResponse, OwnersRequest, OwnersResponse};
 pub use publish::{PublishRequest, encode as encode_publish_body, parse as parse_publish_body};
 pub use router::{CargoState, CrateRecord, router};

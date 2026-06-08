@@ -40,6 +40,16 @@ pub enum CargoError {
     #[error("not found: {0}")]
     NotFound(String),
 
+    /// The publish name collides with an already-published crate under
+    /// cargo's uniqueness rules (case-insensitive, `-`/`_`-insensitive).
+    #[error("crate name conflict: `{requested}` collides with existing `{existing}`")]
+    NameConflict {
+        /// The name the client attempted to publish.
+        requested: String,
+        /// The existing crate it collides with.
+        existing: String,
+    },
+
     /// Feature not yet implemented in this phase (Git index).
     #[error("not implemented: {0}")]
     NotImplemented(String),
@@ -58,6 +68,7 @@ impl CargoError {
             | Self::InvalidVersion(_)
             | Self::InvalidPublish(_)
             | Self::ChecksumMismatch { .. } => StatusCode::BAD_REQUEST,
+            Self::NameConflict { .. } => StatusCode::CONFLICT,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
             Self::Storage(err) => storage_status(err),
@@ -114,6 +125,15 @@ mod tests {
             CargoError::NotImplemented("git".into()).status(),
             StatusCode::NOT_IMPLEMENTED
         );
+    }
+
+    #[test]
+    fn name_conflict_is_409() {
+        let e = CargoError::NameConflict {
+            requested: "foo_bar".into(),
+            existing: "foo-bar".into(),
+        };
+        assert_eq!(e.status(), StatusCode::CONFLICT);
     }
 
     #[test]

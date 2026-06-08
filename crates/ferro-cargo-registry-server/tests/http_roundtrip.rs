@@ -353,6 +353,112 @@ async fn unknown_crate_download_404() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
+/// F5 regression (a): publishing a mixed-case crate (`MyCrate`) must be
+/// retrievable at the lowercase sparse-index path cargo requests
+/// (`my/cr/mycrate`), and the index line must preserve the display case.
+#[tokio::test]
+async fn mixed_case_publish_is_fetchable_at_lowercase_path() {
+    let (app, _tmp) = setup();
+    let resp = send(
+        &app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri("/api/v1/crates/new")
+            .body(Body::from(publish_body("MyCrate", "1.0.0", b"t")))
+            .expect("build"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Cargo fetches the lowercased path.
+    let resp = send(
+        &app,
+        Request::builder()
+            .method(Method::GET)
+            .uri("/index/my/cr/mycrate")
+            .body(Body::empty())
+            .expect("build"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK, "lowercase path must resolve");
+    let body = to_bytes(resp.into_body(), 4096).await.expect("body");
+    let text = std::str::from_utf8(&body).expect("utf8");
+    let v: Value = serde_json::from_str(text.lines().next().expect("line")).expect("parse");
+    // Display case preserved inside the entry.
+    assert_eq!(v["name"], "MyCrate");
+
+    // And download by the published (mixed) case still works.
+    let resp = send(
+        &app,
+        Request::builder()
+            .method(Method::GET)
+            .uri("/api/v1/crates/MyCrate/1.0.0/download")
+            .body(Body::empty())
+            .expect("build"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+/// F5 regression (b): publishing `foo-bar` then `foo_bar` (or a
+/// different-case name) must be rejected as a name collision per cargo's
+/// `-`/`_`- and case-insensitive uniqueness rules.
+#[tokio::test]
+async fn hyphen_underscore_and_case_collisions_are_rejected() {
+    let (app, _tmp) = setup();
+    // Seed `foo-bar`.
+    let resp = send(
+        &app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri("/api/v1/crates/new")
+            .body(Body::from(publish_body("foo-bar", "1.0.0", b"a")))
+            .expect("build"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // `foo_bar` collides under the `-`/`_` rule → 409 Conflict.
+    let resp = send(
+        &app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri("/api/v1/crates/new")
+            .body(Body::from(publish_body("foo_bar", "1.0.0", b"b")))
+            .expect("build"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT, "foo_bar vs foo-bar");
+
+    // A case-only difference also collides.
+    let resp = send(
+        &app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri("/api/v1/crates/new")
+            .body(Body::from(publish_body("Foo-Bar", "2.0.0", b"c")))
+            .expect("build"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT, "Foo-Bar vs foo-bar");
+
+    // Re-publishing the SAME crate (exact display name) is allowed.
+    let resp = send(
+        &app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri("/api/v1/crates/new")
+            .body(Body::from(publish_body("foo-bar", "1.1.0", b"d")))
+            .expect("build"),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "same crate, new version is fine"
+    );
+}
+
 /// DD R2 F-R2-021: the sparse-index GET must honour `If-None-Match`.
 /// The first GET returns `200 OK` with a strong `ETag`; the second GET
 /// carrying the same `ETag` returns `304 Not Modified` with no body; a

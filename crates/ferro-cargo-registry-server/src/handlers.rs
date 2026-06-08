@@ -15,7 +15,7 @@ use tracing::debug;
 
 use crate::error::CargoError;
 use crate::index::{entry_from_manifest, render_lines};
-use crate::name::{index_path, validate_name};
+use crate::name::{canonical_name, index_path, validate_name};
 use crate::owners::{Owner, OwnersMutationResponse, OwnersRequest, OwnersResponse};
 use crate::publish;
 use crate::router::{CargoState, CrateRecord};
@@ -82,7 +82,7 @@ async fn serve_index(
 ) -> Result<Response, CargoError> {
     let crates = state.crates.read().await;
     let record = crates
-        .get(name)
+        .get(&canonical_name(name))
         .ok_or_else(|| CargoError::NotFound(name.to_owned()))?;
     let body = render_lines(&record.entries);
     drop(crates);
@@ -212,10 +212,29 @@ pub async fn handle_publish(
     let entry = entry_from_manifest(&manifest, computed)
         .map_err(|e| CargoError::InvalidPublish(format!("manifest coerce: {e}")))?;
 
+    // Records are keyed by the canonical name (lowercased, `-`/`_`
+    // folded) so a mixed-case publish (`MyCrate`) is retrievable at the
+    // lowercase sparse-index path cargo requests. The display case lives
+    // in the IndexEntry `name`.
+    let key = canonical_name(name);
+
     let mut crates = state.crates.write().await;
-    let record = crates
-        .entry(name.to_owned())
-        .or_insert_with(CrateRecord::default);
+    // Reject a publish that collides with a *different* existing crate
+    // under cargo's case-insensitive / `-`-vs-`_` uniqueness rules. The
+    // canonical key already folds both, so any pre-existing record whose
+    // stored display name differs from this one is a true collision.
+    if let Some(existing) = crates.get(&key)
+        && let Some(existing_display) = existing.entries.first().map(|e| e.name.as_str())
+        && existing_display != name
+    {
+        let existing_owned = existing_display.to_owned();
+        drop(crates);
+        return Err(CargoError::NameConflict {
+            requested: name.to_owned(),
+            existing: existing_owned,
+        });
+    }
+    let record = crates.entry(key).or_insert_with(CrateRecord::default);
     record.tarballs.insert(entry.vers.clone(), digest.clone());
     // Append or replace by (name, vers).
     if let Some(existing) = record.entries.iter_mut().find(|e| e.vers == entry.vers) {
@@ -247,7 +266,7 @@ pub async fn handle_download(
     validate_name(&name)?;
     let crates = state.crates.read().await;
     let record = crates
-        .get(&name)
+        .get(&canonical_name(&name))
         .ok_or_else(|| CargoError::NotFound(name.clone()))?;
     let digest = record
         .tarballs
@@ -297,7 +316,7 @@ async fn set_yanked(
     validate_name(name)?;
     let mut crates = state.crates.write().await;
     let record = crates
-        .get_mut(name)
+        .get_mut(&canonical_name(name))
         .ok_or_else(|| CargoError::NotFound(name.to_owned()))?;
     let entry = record
         .entries
@@ -317,7 +336,7 @@ pub async fn handle_owners_list(
     validate_name(&name)?;
     let crates = state.crates.read().await;
     let record = crates
-        .get(&name)
+        .get(&canonical_name(&name))
         .ok_or_else(|| CargoError::NotFound(name.clone()))?;
     let users = record.owners.clone();
     drop(crates);
@@ -367,7 +386,7 @@ async fn mutate_owners(
     validate_name(name)?;
     let mut crates = state.crates.write().await;
     let record = crates
-        .get_mut(name)
+        .get_mut(&canonical_name(name))
         .ok_or_else(|| CargoError::NotFound(name.to_owned()))?;
     if remove {
         record

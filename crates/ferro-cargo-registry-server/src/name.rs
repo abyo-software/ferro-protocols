@@ -45,6 +45,30 @@ pub fn validate_name(name: &str) -> Result<(), CargoError> {
     }
 }
 
+/// Canonicalize a crate name to its storage / index key.
+///
+/// Cargo treats crate names case-insensitively and considers `-` and `_`
+/// interchangeable for *uniqueness* (a registry must not host both
+/// `foo-bar` and `foo_bar`). The canonical key therefore lowercases the
+/// name and folds `-` to `_`. This is the key under which records are
+/// stored and the form the sparse-index path is derived from, so a
+/// mixed-case publish (`MyCrate`) is retrievable at the lowercase path
+/// (`my/cr/mycrate`) cargo actually requests.
+///
+/// The original display case is preserved separately in the
+/// [`IndexEntry::name`](crate::index::IndexEntry) field.
+#[must_use]
+pub fn canonical_name(name: &str) -> String {
+    name.to_ascii_lowercase().replace('-', "_")
+}
+
+/// Whether two crate names collide under cargo's uniqueness rules
+/// (case-insensitive, `-`/`_`-insensitive).
+#[must_use]
+pub fn names_collide(a: &str, b: &str) -> bool {
+    canonical_name(a) == canonical_name(b)
+}
+
 /// Compute the sparse-index path for `name`.
 ///
 /// Reference: `doc.rust-lang.org/cargo/reference/registries.html#index-format`.
@@ -112,5 +136,19 @@ mod tests {
     fn index_path_lowercases() {
         assert_eq!(index_path("Serde"), "se/rd/serde");
         assert_eq!(index_path("AB"), "2/ab");
+    }
+
+    /// F5: the canonical key lowercases and folds `-`→`_` so cargo's
+    /// uniqueness rules are honoured.
+    #[test]
+    fn canonical_name_folds_case_and_hyphen() {
+        use super::{canonical_name, names_collide};
+        assert_eq!(canonical_name("MyCrate"), "mycrate");
+        assert_eq!(canonical_name("Foo-Bar"), "foo_bar");
+        assert_eq!(canonical_name("foo_bar"), "foo_bar");
+        assert!(names_collide("foo-bar", "foo_bar"));
+        assert!(names_collide("Foo", "foo"));
+        assert!(names_collide("My-Crate", "my_crate"));
+        assert!(!names_collide("foo", "bar"));
     }
 }
