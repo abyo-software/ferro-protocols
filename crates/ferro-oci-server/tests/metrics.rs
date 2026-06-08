@@ -168,7 +168,7 @@ async fn storage_blob_gauge_increments_on_put_and_decrements_on_delete() {
 }
 
 /// R2-4 regression: the `ferrooci_storage_blobs` gauge tracks *distinct*
-/// blobs currently held. PUTting the same digest twice must increment it
+/// blobs currently held. Pushing the same digest twice must increment it
 /// exactly once; a single later delete must then return it to 0 (not -ve
 /// and not stuck at 1). Previously the gauge incremented on every PUT,
 /// over-counting duplicates and contradicting the "distinct blobs" help.

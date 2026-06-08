@@ -98,8 +98,32 @@ impl Config {
 /// Assemble the full application router from a blob store: the OCI
 /// `/v2/**` surface + Kubernetes health probes, wrapped in the
 /// Prometheus instrumentation middleware and `/metrics` endpoint.
+///
+/// The registry metadata plane is ephemeral (in-memory only) — suitable
+/// for the in-memory blob-store deployment and tests. For a durable
+/// filesystem deployment use [`build_app_persisted`], which mirrors
+/// metadata under the storage directory so manifests/tags/referrers
+/// survive a restart (R2-6).
 pub fn build_app(blob_store: SharedBlobStore) -> axum::Router {
     let registry = Arc::new(InMemoryRegistryMeta::new());
+    assemble(blob_store, registry)
+}
+
+/// Like [`build_app`] but with a registry metadata plane durably mirrored
+/// under `storage_dir` (R2-6).
+///
+/// On boot the existing `metadata.json` (if any) under `storage_dir` is
+/// loaded, so a restart of the filesystem-backed binary keeps its
+/// manifests, tag aliases, and referrer index even though those live in
+/// the metadata plane rather than the blob store. A missing/corrupt file
+/// is tolerated (start empty + log).
+pub fn build_app_persisted(blob_store: SharedBlobStore, storage_dir: &std::path::Path) -> axum::Router {
+    let registry = Arc::new(InMemoryRegistryMeta::with_persistence(storage_dir));
+    assemble(blob_store, registry)
+}
+
+/// Shared wiring: state + probes + metrics instrumentation.
+fn assemble(blob_store: SharedBlobStore, registry: Arc<InMemoryRegistryMeta>) -> axum::Router {
     let state = AppState::new(blob_store, registry);
     let blob_count = state.blob_count_handle();
     instrument(
@@ -121,7 +145,14 @@ pub async fn serve(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(?config, "ferro-oci-server starting");
     let addr = config.socket_addr()?;
     let blob_store = config.blob_store()?;
-    let app = build_app(blob_store);
+    // R2-6: when a filesystem storage dir is configured, persist the
+    // registry metadata (manifests/tags/referrers) alongside the blobs so
+    // a restart does not strand blobs whose manifests/tags vanished. The
+    // in-memory deployment stays ephemeral.
+    let app = match &config.storage_dir {
+        Some(dir) => build_app_persisted(blob_store, dir),
+        None => build_app(blob_store),
+    };
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(%addr, "listening");

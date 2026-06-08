@@ -193,11 +193,26 @@ impl Default for SessionLimits {
     }
 }
 
+/// Filename of the durable metadata mirror written under the storage dir
+/// for the filesystem-backed deployment (R2-6).
+pub const METADATA_FILE_NAME: &str = "metadata.json";
+
 /// In-memory `RegistryMeta` impl for tests and single-node deployments.
+///
+/// The hot path is always the in-memory state. When constructed with
+/// [`InMemoryRegistryMeta::with_persistence`], every metadata mutation is
+/// additionally mirrored (snapshot-on-write) to a JSON file under the
+/// storage directory and reloaded on boot, so the filesystem-backed
+/// binary no longer loses manifests/tags/referrers across a restart
+/// (R2-6). The default constructors stay fully in-memory / ephemeral —
+/// tests and the in-memory blob-store deployment are unaffected.
 #[derive(Default)]
 pub struct InMemoryRegistryMeta {
     inner: RwLock<InMemoryState>,
     limits: SessionLimits,
+    /// When set, the file the metadata snapshot is mirrored to on every
+    /// mutation and loaded from on construction. `None` → ephemeral.
+    persist_path: Option<std::path::PathBuf>,
 }
 
 #[derive(Default)]
@@ -210,6 +225,32 @@ struct InMemoryState {
     uploads: BTreeMap<(String, String), UploadState>,
     // name -> subject-digest-string -> [referrer]
     referrers: BTreeMap<String, BTreeMap<String, Vec<ReferrerDescriptor>>>,
+}
+
+/// On-disk metadata snapshot (R2-6).
+///
+/// Mirrors the durable parts of [`InMemoryState`] — manifests (with their
+/// media type + raw body, base64-encoded for JSON), tag aliases, and the
+/// referrer index. In-flight upload sessions are intentionally NOT
+/// persisted: they are transient and a restart legitimately aborts them.
+#[derive(Default, Serialize, Deserialize)]
+struct MetadataSnapshot {
+    /// name -> digest-string -> persisted manifest.
+    manifests: BTreeMap<String, BTreeMap<String, PersistedManifest>>,
+    /// name -> tag -> digest-string.
+    tags: BTreeMap<String, BTreeMap<String, String>>,
+    /// name -> subject-digest-string -> referrers.
+    referrers: BTreeMap<String, BTreeMap<String, Vec<ReferrerDescriptor>>>,
+}
+
+/// A manifest body plus its media type, JSON-serialisable.
+#[derive(Serialize, Deserialize)]
+struct PersistedManifest {
+    media_type: String,
+    /// Raw manifest bytes, hex-encoded so the canonical digest over the
+    /// exact bytes round-trips through JSON. (`hex` is already a crate
+    /// dependency; avoiding base64 keeps the dep set unchanged.)
+    body_hex: String,
 }
 
 impl InMemoryRegistryMeta {
@@ -228,7 +269,135 @@ impl InMemoryRegistryMeta {
         Self {
             inner: RwLock::default(),
             limits,
+            persist_path: None,
         }
+    }
+
+    /// Construct a registry whose metadata is durably mirrored under
+    /// `storage_dir` (R2-6).
+    ///
+    /// On construction the existing `metadata.json` (if any) is loaded so
+    /// manifests/tags/referrers survive a process restart of the
+    /// filesystem-backed binary. A missing or corrupt file is tolerated:
+    /// the registry starts empty and logs a warning (so a single bad write
+    /// cannot wedge boot). Every subsequent metadata mutation snapshots the
+    /// whole state back to that file write-through.
+    #[must_use]
+    pub fn with_persistence(storage_dir: &std::path::Path) -> Self {
+        let persist_path = storage_dir.join(METADATA_FILE_NAME);
+        let state = match Self::load_snapshot(&persist_path) {
+            Ok(Some(state)) => {
+                tracing::info!(
+                    path = %persist_path.display(),
+                    repos = state.manifests.len(),
+                    "loaded persisted registry metadata"
+                );
+                state
+            }
+            Ok(None) => InMemoryState::default(),
+            Err(e) => {
+                tracing::warn!(
+                    path = %persist_path.display(),
+                    error = %e,
+                    "could not load registry metadata; starting empty"
+                );
+                InMemoryState::default()
+            }
+        };
+        Self {
+            inner: RwLock::new(state),
+            limits: SessionLimits::default(),
+            persist_path: Some(persist_path),
+        }
+    }
+
+    /// Load and decode the metadata snapshot from `path`.
+    ///
+    /// Returns `Ok(None)` when the file does not exist, `Ok(Some(state))`
+    /// on a valid snapshot, and `Err` on an unreadable / corrupt file.
+    fn load_snapshot(path: &std::path::Path) -> std::io::Result<Option<InMemoryState>> {
+        let raw = match std::fs::read(path) {
+            Ok(r) => r,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let snapshot: MetadataSnapshot = serde_json::from_slice(&raw)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let mut manifests: BTreeMap<String, BTreeMap<String, (String, Bytes)>> = BTreeMap::new();
+        for (name, by_digest) in snapshot.manifests {
+            let mut inner = BTreeMap::new();
+            for (digest, pm) in by_digest {
+                let bytes = hex::decode(&pm.body_hex).map_err(|e| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, e)
+                })?;
+                inner.insert(digest, (pm.media_type, Bytes::from(bytes)));
+            }
+            manifests.insert(name, inner);
+        }
+        Ok(Some(InMemoryState {
+            manifests,
+            tags: snapshot.tags,
+            uploads: BTreeMap::new(),
+            referrers: snapshot.referrers,
+        }))
+    }
+
+    /// Snapshot the durable parts of `state` to the configured path, if
+    /// persistence is enabled. Best-effort: a write failure is logged but
+    /// does not fail the in-memory mutation (the hot path remains
+    /// authoritative; the next successful write re-syncs the mirror).
+    ///
+    /// Caller holds the write lock so the mirror is consistent with the
+    /// state it snapshots.
+    fn persist_locked(&self, state: &InMemoryState) {
+        let Some(path) = &self.persist_path else {
+            return;
+        };
+        let snapshot = MetadataSnapshot {
+            manifests: state
+                .manifests
+                .iter()
+                .map(|(name, by_digest)| {
+                    let inner = by_digest
+                        .iter()
+                        .map(|(digest, (media_type, body))| {
+                            (
+                                digest.clone(),
+                                PersistedManifest {
+                                    media_type: media_type.clone(),
+                                    body_hex: hex::encode(body),
+                                },
+                            )
+                        })
+                        .collect();
+                    (name.clone(), inner)
+                })
+                .collect(),
+            tags: state.tags.clone(),
+            referrers: state.referrers.clone(),
+        };
+        if let Err(e) = Self::write_snapshot_atomic(path, &snapshot) {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "failed to persist registry metadata snapshot"
+            );
+        }
+    }
+
+    /// Serialise `snapshot` and write it to `path` atomically via a
+    /// temp-file + rename so a crash mid-write never leaves a truncated
+    /// `metadata.json`.
+    fn write_snapshot_atomic(
+        path: &std::path::Path,
+        snapshot: &MetadataSnapshot,
+    ) -> std::io::Result<()> {
+        let bytes = serde_json::to_vec(snapshot)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, &bytes)?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
     }
 
     /// The upload-session limits in force.
@@ -279,6 +448,7 @@ impl RegistryMeta for InMemoryRegistryMeta {
                 .or_default()
                 .insert(tag.clone(), digest.to_string());
         }
+        self.persist_locked(&guard);
         drop(guard);
         Ok(())
     }
@@ -320,6 +490,9 @@ impl RegistryMeta for InMemoryRegistryMeta {
                 let removed = name_map.remove(&digest_str).is_some();
                 if removed && let Some(tag_map) = guard.tags.get_mut(name) {
                     tag_map.retain(|_, v| v != &digest_str);
+                }
+                if removed {
+                    self.persist_locked(&guard);
                 }
                 drop(guard);
                 Ok(removed)
@@ -493,6 +666,7 @@ impl RegistryMeta for InMemoryRegistryMeta {
             .entry(subject.to_string())
             .or_default()
             .push(descriptor);
+        self.persist_locked(&guard);
         drop(guard);
         Ok(())
     }
@@ -686,6 +860,123 @@ mod tests {
             .await
             .expect("get state");
         assert!(gone.is_none(), "swept session must no longer resolve");
+    }
+
+    #[tokio::test]
+    async fn metadata_persists_across_simulated_restart() {
+        // R2-6: build a persistence-backed registry on a temp dir, push a
+        // manifest + tag + referrer, drop it (simulating a process exit),
+        // rebuild from the SAME dir, and assert everything still resolves.
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let dir = tmp.path();
+
+        let manifest_body = Bytes::from_static(b"{\"schemaVersion\":2}");
+        let digest = Digest::sha256_of(&manifest_body);
+        let subject = Digest::sha256_of(b"subject-manifest");
+        let referrer_digest = Digest::sha256_of(b"sbom-referrer");
+
+        {
+            let reg = InMemoryRegistryMeta::with_persistence(dir);
+            reg.put_manifest(
+                "lib/alpine",
+                &Reference::Tag("latest".to_owned()),
+                &digest,
+                "application/vnd.oci.image.manifest.v1+json",
+                manifest_body.clone(),
+            )
+            .await
+            .expect("put manifest");
+            reg.register_referrer(
+                "lib/alpine",
+                &subject,
+                ReferrerDescriptor {
+                    media_type: "application/vnd.oci.image.manifest.v1+json".to_owned(),
+                    digest: referrer_digest.clone(),
+                    size: 12,
+                    artifact_type: Some("application/spdx+json".to_owned()),
+                    annotations: None,
+                },
+            )
+            .await
+            .expect("register referrer");
+            // `reg` dropped here → simulates process exit; only the
+            // metadata.json on disk survives.
+        }
+
+        // The snapshot file must exist under the storage dir.
+        assert!(
+            dir.join(super::METADATA_FILE_NAME).is_file(),
+            "metadata.json written"
+        );
+
+        // "Restart": rebuild from the same directory.
+        let reg2 = InMemoryRegistryMeta::with_persistence(dir);
+
+        // Manifest resolvable by digest AND by the tag.
+        let by_tag = reg2
+            .get_manifest("lib/alpine", &Reference::Tag("latest".to_owned()))
+            .await
+            .expect("get by tag")
+            .expect("tag still resolves after restart");
+        assert_eq!(by_tag.0, digest, "digest preserved");
+        assert_eq!(&by_tag.2[..], &manifest_body[..], "exact body preserved");
+
+        let by_digest = reg2
+            .get_manifest("lib/alpine", &Reference::Digest(digest.clone()))
+            .await
+            .expect("get by digest")
+            .expect("digest still resolves after restart");
+        assert_eq!(by_digest.0, digest);
+
+        // Referrer index preserved.
+        let referrers = reg2
+            .list_referrers("lib/alpine", &subject, None)
+            .await
+            .expect("list referrers");
+        assert_eq!(referrers.len(), 1, "referrer survived restart");
+        assert_eq!(referrers[0].digest, referrer_digest);
+
+        // Repository catalog reflects the persisted repo.
+        let repos = reg2.list_repositories(None, None).await.expect("repos");
+        assert_eq!(repos, vec!["lib/alpine".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn corrupt_metadata_file_starts_empty_not_panics() {
+        // R2-6 robustness: a garbage metadata.json must not wedge boot —
+        // the registry starts empty and logs (here we just assert it does
+        // not panic and is empty).
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        std::fs::write(tmp.path().join(super::METADATA_FILE_NAME), b"{ not json")
+            .expect("write garbage");
+        let reg = InMemoryRegistryMeta::with_persistence(tmp.path());
+        let repos = reg.list_repositories(None, None).await.expect("repos");
+        assert!(repos.is_empty(), "corrupt snapshot ⇒ empty registry");
+    }
+
+    #[tokio::test]
+    async fn in_memory_registry_does_not_write_metadata_file() {
+        // The default (non-persistent) constructor must stay ephemeral:
+        // no metadata.json side effects for the in-memory deployment.
+        let reg = InMemoryRegistryMeta::new();
+        let digest = Digest::sha256_of(b"body");
+        reg.put_manifest(
+            "repo",
+            &Reference::Digest(digest.clone()),
+            &digest,
+            "application/vnd.oci.image.manifest.v1+json",
+            Bytes::from_static(b"body"),
+        )
+        .await
+        .expect("put");
+        // Resolvable in-memory, but nothing is persisted (persist_path is
+        // None, so persist_locked is a no-op).
+        assert!(
+            reg.get_manifest("repo", &Reference::Digest(digest))
+                .await
+                .expect("get")
+                .is_some()
+        );
     }
 
     #[tokio::test]

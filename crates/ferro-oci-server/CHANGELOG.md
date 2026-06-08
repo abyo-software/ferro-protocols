@@ -15,6 +15,11 @@ releases. Breaking changes will be released as a separate `v0.2.0`.
   so a client could push bytes hashing to `<D2>` under the key `<D1>`
   and corrupt content-addressing. A mismatch is now rejected with
   `400 DIGEST_INVALID`; a matching by-digest push still returns `201`.
+  Additionally, a non-`sha256` digest reference (e.g. `sha512:<128-hex>`)
+  is now rejected with `400 DIGEST_INVALID` instead of silently skipping
+  verification — the registry canonicalises manifests with SHA-256 only,
+  and the old "compare only when the algorithms match" guard let a
+  `sha512:` reference fall through and return `201` for arbitrary bytes.
 - **Per-session upload size cap bounds a memory-exhaustion DoS.** Chunked
   blob uploads accumulated in an unbounded in-memory buffer, so an
   unauthenticated client could open sessions and append sub-limit chunks
@@ -22,15 +27,24 @@ releases. Breaking changes will be released as a separate `v0.2.0`.
   `MAX_UPLOAD_SESSION_BYTES` (4 GiB default; overridable per `AppState`
   via `with_max_upload_session_bytes`). A chunk that would exceed the cap
   is rejected with `413 Payload Too Large` (`BLOB_UPLOAD_INVALID`) and the
-  session buffer is dropped immediately. *Follow-up (deferred):* the
-  session store still keeps uploads wholly in RAM; spooling large uploads
-  to disk and expiring idle sessions are larger refactors tracked
-  separately — the size cap closes the unbounded-growth DoS now.
+  session buffer is dropped immediately.
+- **Concurrent upload-session count cap + idle-session TTL.** The byte cap
+  above bounded *one* session, but a client could still open an unbounded
+  *number* of sessions (or many near-cap ones) to pin memory. The registry
+  now caps concurrent in-flight upload sessions (`DEFAULT_MAX_UPLOAD_SESSIONS`,
+  1024; configurable via `InMemoryRegistryMeta::with_session_limits`) —
+  a `POST .../uploads/` over the cap returns `429 Too Many Requests` — and
+  evicts sessions idle past a TTL (`DEFAULT_UPLOAD_SESSION_TTL`, 1 h): a new
+  upload lazily sweeps expired sessions, and an access to an expired session
+  evicts it (the handler then answers `404 BLOB_UPLOAD_UNKNOWN`).
 - **PATCH `Content-Range` length is now validated against the body.** A
   chunk PATCH validated only the range *start*, ignoring the *end*, so a
   request claiming `Content-Range: 0-999999` while sending one byte was
   accepted. The inclusive range length (`end - start + 1`) must now equal
   the body length, else `416 Range Not Satisfiable` (`BLOB_UPLOAD_INVALID`).
+  The degenerate `Content-Range: 0-18446744073709551615` (`0-u64::MAX`),
+  which overflowed that arithmetic (debug panic / release wrap-to-0), is
+  now rejected outright rather than crashing or matching an empty body.
 
 ### Changed
 - **Explicit request body limit (`MAX_BODY_BYTES`, 512 MiB) on the
@@ -44,13 +58,30 @@ releases. Breaking changes will be released as a separate `v0.2.0`.
   endpoint into O(number-of-blobs) FS work per request. The gauge is now
   fed by an O(1) atomic blob counter on `AppState`, incremented on blob
   put and decremented on blob delete. The gauge honestly measures "blobs
-  written via this server instance".
+  written via this server instance". The increment now fires only when the
+  digest is *newly* inserted (a `contains` check precedes the put), so a
+  duplicate `PUT` of an existing digest no longer over-counts and a later
+  single delete cannot drive the gauge below the true distinct-blob count.
 - **`/metrics` requests are now themselves instrumented.** The tracking
   middleware is layered *over* the merged `/metrics` route (previously
   under it), so a `/metrics` scrape is counted under the `metrics`
   handler label that `Metrics::handler_for` already emitted.
 
 ### Added
+- **Durable registry metadata for the filesystem deployment.** Previously
+  the binary stored blob *bytes* on disk but kept the metadata plane
+  (manifests, tag aliases, referrer index) purely in memory, so a restart
+  stranded blobs whose manifests/tags had vanished. When
+  `FERRO_OCI_STORAGE_DIR` is set, the metadata is now mirrored
+  write-through to a `metadata.json` snapshot under that directory
+  (atomic temp-file + rename) and reloaded on boot, so manifests/tags/
+  referrers survive a restart together with the blobs. A missing/corrupt
+  snapshot is tolerated (start empty + log). In-flight upload sessions are
+  intentionally *not* persisted. New `build_app_persisted()` and
+  `InMemoryRegistryMeta::with_persistence()` constructors; the in-memory
+  (no `FERRO_OCI_STORAGE_DIR`) deployment stays ephemeral. *Follow-up:* an
+  external SQLite/Postgres metadata backend remains on the roadmap; the
+  JSON snapshot is the single-node durable mirror for now.
 - **Prometheus `/metrics` endpoint + request instrumentation.** New
   `metrics` module exposes a `GET /metrics` route (Prometheus text
   exposition format) and a tower/axum middleware that records, by

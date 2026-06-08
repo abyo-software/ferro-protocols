@@ -69,9 +69,13 @@ Rust artifact repository.
 
 ## What this crate does **not** do
 
-- **Persistent metadata** — only `InMemoryRegistryMeta` ships. A
-  SQLite / Postgres backend is on the roadmap; the trait is stable
-  enough that you can implement your own today.
+- **External metadata database** — only `InMemoryRegistryMeta` ships.
+  A SQLite / Postgres backend is on the roadmap; the trait is stable
+  enough that you can implement your own today. Note that the
+  filesystem deployment *does* durably persist metadata to a
+  `metadata.json` snapshot under `FERRO_OCI_STORAGE_DIR` (see below),
+  so manifests/tags/referrers survive a restart even without an
+  external database.
 - **Authentication** — handlers are open. Layer your auth in the
   Axum middleware stack above this router.
 - **Sigstore / SLSA / TUF / cosign** — the OCI server stores and
@@ -86,8 +90,18 @@ through the environment:
 | Variable                | Default        | Meaning                                          |
 |-------------------------|----------------|--------------------------------------------------|
 | `FERRO_OCI_LISTEN`      | `0.0.0.0:8080` | `host:port` to bind                              |
-| `FERRO_OCI_STORAGE_DIR` | *(in-memory)*  | filesystem dir for blob bytes; unset → RAM       |
+| `FERRO_OCI_STORAGE_DIR` | *(in-memory)*  | filesystem dir for blob bytes **and** metadata; unset → RAM (ephemeral) |
 | `RUST_LOG`              | `info`         | `tracing-subscriber` env filter                  |
+
+When `FERRO_OCI_STORAGE_DIR` is set the registry metadata plane
+(manifests, tag aliases, referrer index) is durably mirrored to a
+`metadata.json` snapshot in that directory (write-through on every
+mutation, atomic temp-file + rename) and reloaded on boot, so blobs and
+their manifests/tags survive a restart together. A missing or corrupt
+snapshot is tolerated — the registry starts empty and logs a warning.
+In-flight upload sessions are intentionally *not* persisted (a restart
+aborts them). With `FERRO_OCI_STORAGE_DIR` unset, both blobs and
+metadata are in-memory only and lost on exit.
 
 ```bash
 FERRO_OCI_LISTEN=127.0.0.1:5000 \
@@ -147,8 +161,10 @@ chunked PATCH → finalize PUT → blob HEAD/GET → manifest PUT-by-tag →
 manifest GET-by-digest → referrers GET → tag list → catalog → delete)
 and the error variants in spec §6.2.
 
-Persistent metadata backends (SQLite / Postgres) and an
-authentication trait remain on the roadmap.
+An external metadata database (SQLite / Postgres) and an
+authentication trait remain on the roadmap. The filesystem deployment
+already persists metadata durably via a `metadata.json` snapshot (see
+"Run the server").
 
 ## Status
 
@@ -159,7 +175,7 @@ authentication trait remain on the roadmap.
 | Chunked uploads | working |
 | Runnable server binary + K8s probes (`/live`, `/healthz`, `/ready`) | working |
 | OCI v1.1 conformance suite | **75/75 specs pass** (all 4 workflows) |
-| Persistent metadata backend | in-memory only |
+| Metadata durability | filesystem deployment persists to `metadata.json`; external DB backend (SQLite/Postgres) on roadmap |
 | Authentication | scaffold — layer your own middleware |
 | MSRV | rustc **1.88** |
 
