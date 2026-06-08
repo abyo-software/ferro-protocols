@@ -109,6 +109,26 @@ pub enum ProtocolError {
     #[error("all configured hosts failed; last error: {0}")]
     AllHostsFailed(Box<Self>),
 
+    /// A peer declared, or streamed, a window that exceeds the server's
+    /// configured aggregate limits — either the declared event `count`
+    /// or the accumulated event count / byte total grew past the cap.
+    ///
+    /// Surfaces the per-window resource-exhaustion (memory-growth)
+    /// defence, complementing the per-frame [`FrameError::PayloadTooLarge`]
+    /// / [`FrameError::DecompressedTooLarge`] caps. The server stops
+    /// reading and returns this error rather than accumulating further.
+    #[error("window {kind} {requested} exceeds configured limit of {limit}")]
+    WindowTooLarge {
+        /// Which aggregate dimension overflowed (`"event count"` or
+        /// `"byte total"`).
+        kind: &'static str,
+        /// The value that breached the cap (declared count, observed
+        /// event count, or accumulated byte total).
+        requested: usize,
+        /// The configured cap that was exceeded.
+        limit: usize,
+    },
+
     /// TLS configuration error (key/cert load, server-name parse, …).
     #[cfg(feature = "tls")]
     #[error("tls config: {0}")]

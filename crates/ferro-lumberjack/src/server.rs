@@ -42,7 +42,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, ToSocketAddrs};
 
 use crate::frame::{Frame, FrameDecoder, encode_ack};
-use crate::{DEFAULT_MAX_FRAME_PAYLOAD, FrameError, ProtocolError};
+use crate::{
+    DEFAULT_MAX_FRAME_PAYLOAD, DEFAULT_MAX_WINDOW_BYTES, DEFAULT_MAX_WINDOW_EVENTS, FrameError,
+    ProtocolError,
+};
 
 #[cfg(feature = "tls")]
 use crate::tls::ServerTlsConfig;
@@ -66,6 +69,8 @@ impl Server {
 #[derive(Debug, Default)]
 pub struct ServerBuilder {
     max_frame_payload: Option<usize>,
+    max_window_events: Option<usize>,
+    max_window_bytes: Option<usize>,
     #[cfg(feature = "tls")]
     tls: Option<ServerTlsConfig>,
 }
@@ -77,6 +82,36 @@ impl ServerBuilder {
     #[must_use]
     pub const fn max_frame_payload(mut self, n: usize) -> Self {
         self.max_frame_payload = Some(n);
+        self
+    }
+
+    /// Cap the number of data events the server will accumulate for a
+    /// single window. The window's declared `count` is peer-supplied, so
+    /// without this aggregate cap a peer could declare a huge count and
+    /// stream many small frames, forcing the receiver's per-window buffer
+    /// to grow unboundedly. A window whose declared count — or whose
+    /// observed event count mid-stream — exceeds `n` is rejected with
+    /// [`ProtocolError::WindowTooLarge`] and reading stops immediately.
+    ///
+    /// Default is [`crate::DEFAULT_MAX_WINDOW_EVENTS`] (100 000). Pass
+    /// `usize::MAX` to disable (not recommended for untrusted peers).
+    #[must_use]
+    pub const fn max_window_events(mut self, n: usize) -> Self {
+        self.max_window_events = Some(n);
+        self
+    }
+
+    /// Cap the total accumulated payload bytes across all events in a
+    /// single window. Complements [`Self::max_window_events`]: once the
+    /// summed per-event payload bytes exceed `n`, the window is rejected
+    /// with [`ProtocolError::WindowTooLarge`] and reading stops
+    /// immediately (no further events are accumulated).
+    ///
+    /// Default is [`crate::DEFAULT_MAX_WINDOW_BYTES`] (256 MiB). Pass
+    /// `usize::MAX` to disable (not recommended for untrusted peers).
+    #[must_use]
+    pub const fn max_window_bytes(mut self, n: usize) -> Self {
+        self.max_window_bytes = Some(n);
         self
     }
 
@@ -95,6 +130,8 @@ impl ServerBuilder {
         Ok(Listener {
             inner,
             max_frame_payload: self.max_frame_payload.unwrap_or(DEFAULT_MAX_FRAME_PAYLOAD),
+            max_window_events: self.max_window_events.unwrap_or(DEFAULT_MAX_WINDOW_EVENTS),
+            max_window_bytes: self.max_window_bytes.unwrap_or(DEFAULT_MAX_WINDOW_BYTES),
             #[cfg(feature = "tls")]
             tls: self.tls,
         })
@@ -107,6 +144,8 @@ impl ServerBuilder {
 pub struct Listener {
     inner: TcpListener,
     max_frame_payload: usize,
+    max_window_events: usize,
+    max_window_bytes: usize,
     #[cfg(feature = "tls")]
     tls: Option<ServerTlsConfig>,
 }
@@ -130,6 +169,8 @@ impl Listener {
                 conn: Conn::Tls(Box::new(tls_stream)),
                 decoder: FrameDecoder::with_max_frame_payload(self.max_frame_payload),
                 max_frame_payload: self.max_frame_payload,
+                max_window_events: self.max_window_events,
+                max_window_bytes: self.max_window_bytes,
                 peer,
             });
         }
@@ -138,6 +179,8 @@ impl Listener {
             conn: Conn::Plain(sock),
             decoder: FrameDecoder::with_max_frame_payload(self.max_frame_payload),
             max_frame_payload: self.max_frame_payload,
+            max_window_events: self.max_window_events,
+            max_window_bytes: self.max_window_bytes,
             peer,
         })
     }
@@ -149,6 +192,8 @@ pub struct ServerConnection {
     conn: Conn,
     decoder: FrameDecoder,
     max_frame_payload: usize,
+    max_window_events: usize,
+    max_window_bytes: usize,
     peer: SocketAddr,
 }
 
@@ -225,6 +270,7 @@ impl ServerConnection {
         let mut events: Vec<JsonEvent> = Vec::new();
         let mut window_remaining: Option<u32> = None;
         let mut last_seq: u32 = 0;
+        let mut accumulated_bytes: usize = 0;
 
         loop {
             // 1) Drain anything currently buffered.
@@ -236,6 +282,9 @@ impl ServerConnection {
                         if window_remaining.is_some() {
                             return Err(ProtocolError::Codec(FrameError::UnknownFrameType(b'W')));
                         }
+                        // Reject an over-large declared window up front so we
+                        // never begin accumulating events for it.
+                        Self::check_declared_window(count, self.max_window_events)?;
                         if count == 0 {
                             // Empty window — return immediately so the caller
                             // can decide whether to ACK seq=0 or skip.
@@ -251,6 +300,9 @@ impl ServerConnection {
                             &mut events,
                             &mut window_remaining,
                             &mut last_seq,
+                            &mut accumulated_bytes,
+                            self.max_window_events,
+                            self.max_window_bytes,
                             seq,
                             payload,
                         )?;
@@ -270,6 +322,9 @@ impl ServerConnection {
                                         &mut events,
                                         &mut window_remaining,
                                         &mut last_seq,
+                                        &mut accumulated_bytes,
+                                        self.max_window_events,
+                                        self.max_window_bytes,
                                         seq,
                                         payload,
                                     )?;
@@ -324,13 +379,39 @@ impl ServerConnection {
         }
     }
 
+    /// Reject a window whose peer-declared event `count` already exceeds
+    /// the configured aggregate cap, before any data frame is read.
+    const fn check_declared_window(count: u32, max_events: usize) -> Result<(), ProtocolError> {
+        if count as usize > max_events {
+            return Err(ProtocolError::WindowTooLarge {
+                kind: "event count",
+                requested: count as usize,
+                limit: max_events,
+            });
+        }
+        Ok(())
+    }
+
     /// Record a JSON event into the in-flight window. Errors if a data
     /// frame arrives before its Window header, and decrements the
     /// remaining count.
+    ///
+    /// Also enforces the per-window aggregate caps mid-stream: if
+    /// accumulating this event would push the observed event count past
+    /// `max_events`, or the accumulated payload bytes past `max_bytes`,
+    /// the event is **not** pushed and [`ProtocolError::WindowTooLarge`]
+    /// is returned so the caller stops reading. (The declared `count` is
+    /// also vetted up front in [`Self::read_window`]; this guards against
+    /// a peer streaming past its own declaration via, e.g., nested
+    /// compressed batches.)
+    #[allow(clippy::too_many_arguments)]
     fn record_event(
         events: &mut Vec<JsonEvent>,
         window_remaining: &mut Option<u32>,
         last_seq: &mut u32,
+        accumulated_bytes: &mut usize,
+        max_events: usize,
+        max_bytes: usize,
         seq: u32,
         payload: Vec<u8>,
     ) -> Result<(), ProtocolError> {
@@ -340,8 +421,28 @@ impl ServerConnection {
         if *remaining == 0 {
             return Err(ProtocolError::Codec(FrameError::UnknownFrameType(b'J')));
         }
+        // Aggregate event-count cap: reject before pushing so `events`
+        // never grows past the configured maximum.
+        if events.len() >= max_events {
+            return Err(ProtocolError::WindowTooLarge {
+                kind: "event count",
+                requested: events.len() + 1,
+                limit: max_events,
+            });
+        }
+        // Aggregate byte cap: reject before pushing so accumulated memory
+        // never grows past the configured maximum.
+        let next_bytes = accumulated_bytes.saturating_add(payload.len());
+        if next_bytes > max_bytes {
+            return Err(ProtocolError::WindowTooLarge {
+                kind: "byte total",
+                requested: next_bytes,
+                limit: max_bytes,
+            });
+        }
         *remaining -= 1;
         *last_seq = seq;
+        *accumulated_bytes = next_bytes;
         events.push(JsonEvent { seq, payload });
         Ok(())
     }
@@ -453,6 +554,22 @@ mod tests {
     /// the listener itself.
     async fn ephemeral_listener() -> (SocketAddr, Listener) {
         let listener = Server::builder().bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        (addr, listener)
+    }
+
+    /// Like [`ephemeral_listener`] but with a custom window-event cap and
+    /// window-byte cap, for the aggregate-DoS regression tests.
+    async fn ephemeral_listener_capped(
+        max_events: usize,
+        max_bytes: usize,
+    ) -> (SocketAddr, Listener) {
+        let listener = Server::builder()
+            .max_window_events(max_events)
+            .max_window_bytes(max_bytes)
+            .bind("127.0.0.1:0")
+            .await
+            .unwrap();
         let addr = listener.local_addr().unwrap();
         (addr, listener)
     }
@@ -757,5 +874,150 @@ mod tests {
         assert_eq!(windows[0].events.len(), 2);
         assert_eq!(windows[1].events.len(), 1);
         assert_eq!(windows[1].last_seq, 3);
+    }
+
+    // -----------------------------------------------------------------
+    // R6-P2: per-window aggregate caps (event count / accumulated bytes).
+    // A peer can declare a huge Window `count` and stream many small
+    // frames, forcing `events` to grow unboundedly. These tests pin the
+    // declared-count reject, the mid-stream count reject, the byte-total
+    // reject, and that a within-cap window still works.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn default_window_caps_are_documented_values() {
+        assert_eq!(DEFAULT_MAX_WINDOW_EVENTS, 100_000);
+        assert_eq!(DEFAULT_MAX_WINDOW_BYTES, 256 * 1024 * 1024);
+    }
+
+    #[tokio::test]
+    async fn declared_window_count_above_cap_is_rejected_before_accumulating() {
+        // Cap at 3 events. A window declaring count=10 must be rejected
+        // the instant the Window header is parsed — before ANY data frame
+        // is read, so `events` never grows.
+        let (addr, listener) = ephemeral_listener_capped(3, 1 << 30).await;
+        let server = tokio::spawn(async move {
+            let mut conn = listener.accept().await.unwrap();
+            conn.read_window().await
+        });
+
+        let mut client = ClientTcp::connect(addr).await.unwrap();
+        // Only send the oversized Window header — deliberately send NO
+        // data frames. If the server accumulated unboundedly it would
+        // block waiting for 10 frames; instead it must reject immediately.
+        client.write_all(&encode_window(10)).await.unwrap();
+        client.flush().await.unwrap();
+
+        let result = server.await.unwrap();
+        match result {
+            Err(ProtocolError::WindowTooLarge {
+                kind: "event count",
+                requested: 10,
+                limit: 3,
+            }) => {}
+            other => panic!("expected WindowTooLarge(count=10, limit=3), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn accumulated_bytes_above_cap_is_rejected_mid_window() {
+        // Event-count cap is generous (100), but the byte cap is 10. The
+        // window declares 5 events (within the event cap), so the up-front
+        // count gate does NOT fire — the byte guard inside record_event is
+        // the sole defence. Three 4-byte events = 12 bytes > 10 → reject on
+        // the 3rd before it is pushed, proving accumulation stops early.
+        let (addr, listener) = ephemeral_listener_capped(100, 10).await;
+        let server = tokio::spawn(async move {
+            let mut conn = listener.accept().await.unwrap();
+            conn.read_window().await
+        });
+
+        let mut client = ClientTcp::connect(addr).await.unwrap();
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&encode_window(5));
+        for i in 0..5_u32 {
+            wire.extend_from_slice(&encode_json_frame(i + 1, b"4444")); // 4 bytes each
+        }
+        client.write_all(&wire).await.unwrap();
+        client.flush().await.unwrap();
+
+        let result = server.await.unwrap();
+        match result {
+            Err(ProtocolError::WindowTooLarge {
+                kind: "byte total",
+                requested,
+                limit: 10,
+            }) => {
+                // After 2 events accumulated=8; the 3rd would make 12 > 10.
+                assert_eq!(requested, 12, "must reject when total would exceed 10");
+            }
+            other => panic!("expected WindowTooLarge(byte total, limit=10), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn byte_cap_is_enforced_inside_compressed_batch() {
+        // The byte guard must also fire for events smuggled inside a
+        // compressed batch (the inner record_event call site). Declared
+        // count = 5 (within the event cap), byte cap = 10. Five 4-byte
+        // events inside one C frame → reject mid-batch at 12 > 10.
+        let (addr, listener) = ephemeral_listener_capped(100, 10).await;
+        let server = tokio::spawn(async move {
+            let mut conn = listener.accept().await.unwrap();
+            conn.read_window().await
+        });
+
+        let mut client = ClientTcp::connect(addr).await.unwrap();
+        let mut inner = Vec::new();
+        for i in 0..5_u32 {
+            inner.extend_from_slice(&encode_json_frame(i + 1, b"4444"));
+        }
+        let compressed = encode_compressed(6, &inner).unwrap();
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&encode_window(5));
+        wire.extend_from_slice(&compressed);
+        client.write_all(&wire).await.unwrap();
+        client.flush().await.unwrap();
+
+        let result = server.await.unwrap();
+        match result {
+            Err(ProtocolError::WindowTooLarge {
+                kind: "byte total",
+                requested: 12,
+                limit: 10,
+            }) => {}
+            other => panic!("expected WindowTooLarge(byte total, limit=10) in C batch, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn window_exactly_at_caps_still_succeeds() {
+        // A window whose declared count == cap and whose total bytes ==
+        // cap must be accepted (boundary is inclusive on the accept side).
+        // Cap: 3 events, 9 bytes. Send 3 events of 3 bytes = 9 bytes total.
+        let (addr, listener) = ephemeral_listener_capped(3, 9).await;
+        let server = tokio::spawn(async move {
+            let mut conn = listener.accept().await.unwrap();
+            conn.read_and_ack().await.unwrap()
+        });
+
+        let mut client = ClientTcp::connect(addr).await.unwrap();
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&encode_window(3));
+        for i in 0..3_u32 {
+            wire.extend_from_slice(&encode_json_frame(i + 1, b"abc")); // 3 bytes
+        }
+        client.write_all(&wire).await.unwrap();
+        client.flush().await.unwrap();
+
+        let mut ack = [0u8; 6];
+        tokio::io::AsyncReadExt::read_exact(&mut client, &mut ack)
+            .await
+            .unwrap();
+        assert_eq!(u32::from_be_bytes([ack[2], ack[3], ack[4], ack[5]]), 3);
+
+        let window = server.await.unwrap().expect("at-cap window must succeed");
+        assert_eq!(window.events.len(), 3);
+        assert_eq!(window.last_seq, 3);
     }
 }

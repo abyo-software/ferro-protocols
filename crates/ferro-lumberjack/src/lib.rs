@@ -56,6 +56,29 @@ pub const PROTOCOL_VERSION: u8 = b'2';
 /// by [`FrameDecoder::new`].
 pub const DEFAULT_MAX_FRAME_PAYLOAD: usize = 64 * 1024 * 1024;
 
+/// Default maximum number of data events the server will accumulate for a
+/// single window (100 000).
+///
+/// A window's declared `count` is peer-supplied; without an aggregate cap a
+/// malicious peer can declare a huge count and stream many small frames,
+/// forcing the receiver's per-window `Vec` (and memory) to grow unboundedly
+/// before the window completes. The server rejects a window whose declared
+/// count, or whose observed event count mid-stream, exceeds this value with
+/// [`ProtocolError::WindowTooLarge`]. Used by
+/// [`server::ServerBuilder::max_window_events`].
+pub const DEFAULT_MAX_WINDOW_EVENTS: usize = 100_000;
+
+/// Default maximum total accumulated payload bytes across all events in a
+/// single window (256 MiB).
+///
+/// Complements [`DEFAULT_MAX_WINDOW_EVENTS`]: even within the event-count
+/// cap, the sum of per-event payloads is bounded so a window of moderately
+/// sized events cannot exhaust memory. The server rejects a window once the
+/// accumulated payload bytes exceed this value with
+/// [`ProtocolError::WindowTooLarge`]. Used by
+/// [`server::ServerBuilder::max_window_bytes`].
+pub const DEFAULT_MAX_WINDOW_BYTES: usize = 256 * 1024 * 1024;
+
 #[cfg(test)]
 mod tests {
     use super::*;

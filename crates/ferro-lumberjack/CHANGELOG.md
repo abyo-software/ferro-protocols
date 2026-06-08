@@ -12,6 +12,27 @@ public items.
 
 ## [Unreleased]
 
+### Security
+- **Server: bound per-window memory accumulation (DoS hardening).**
+  `ServerConnection::read_window` previously trusted the peer-supplied
+  `Window { count }` and would accumulate every JSON frame into an
+  in-memory `Vec` until that declared count was reached, letting a peer
+  declare a huge window and stream many small frames to grow memory
+  unboundedly (the per-frame payload / decompression caps did not bound
+  the *aggregate*). Two configurable aggregate caps now bound a single
+  window: a maximum event count and a maximum total accumulated payload
+  byte count. A window whose declared `count` exceeds the event cap is
+  rejected up front (before any data frame is read); a window that
+  exceeds either cap mid-stream (including events smuggled inside a
+  compressed `C` batch) is rejected without accumulating further. Both
+  surface the new `ProtocolError::WindowTooLarge` and stop reading.
+
+### Added
+- `DEFAULT_MAX_WINDOW_EVENTS` (100 000) and `DEFAULT_MAX_WINDOW_BYTES`
+  (256 MiB) crate constants, and `ServerBuilder::max_window_events` /
+  `ServerBuilder::max_window_bytes` to override them.
+- `ProtocolError::WindowTooLarge { kind, requested, limit }` variant.
+
 ### Documentation
 - Added a CI status badge to the README and normalised the docs.rs badge
   to the `img.shields.io/docsrs` form.
