@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::body::Body;
-use axum::http::{Request, StatusCode};
-use ferro_blob_store::{InMemoryBlobStore, SharedBlobStore};
+use axum::http::{Method, Request, StatusCode};
+use ferro_blob_store::{Digest, InMemoryBlobStore, SharedBlobStore};
 use ferro_oci_server::{AppState, InMemoryRegistryMeta, Metrics, instrument, router};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
@@ -18,8 +18,9 @@ use tower::ServiceExt;
 fn instrumented_app() -> Router {
     let blob_store: SharedBlobStore = Arc::new(InMemoryBlobStore::new());
     let registry = Arc::new(InMemoryRegistryMeta::new());
-    let state = AppState::new(blob_store.clone(), registry);
-    instrument(router(state), Metrics::new(), blob_store)
+    let state = AppState::new(blob_store, registry);
+    let blob_count = state.blob_count_handle();
+    instrument(router(state), Metrics::new(), blob_count)
 }
 
 async fn body_string(app: &Router, uri: &str) -> (StatusCode, String) {
@@ -103,5 +104,90 @@ async fn storage_blob_gauge_reflects_stored_blobs() {
     assert!(
         body.lines().any(|l| l == "ferrooci_storage_blobs 0"),
         "expected storage_blobs 0 on empty store:\n{body}"
+    );
+}
+
+/// Read the `ferrooci_storage_blobs` gauge value from a scrape body.
+fn storage_blobs_value(body: &str) -> i64 {
+    body.lines()
+        .find_map(|l| l.strip_prefix("ferrooci_storage_blobs "))
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .expect("storage_blobs gauge present")
+}
+
+/// Monolithically push a blob and assert `201 Created`.
+async fn put_blob(app: &Router, payload: &[u8]) -> String {
+    let digest = Digest::sha256_of(payload).to_string();
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/v2/repo/blobs/uploads/?digest={digest}"))
+                .body(Body::from(payload.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .expect("put blob");
+    assert_eq!(resp.status(), StatusCode::CREATED, "blob push");
+    digest
+}
+
+/// F8 regression: the `ferrooci_storage_blobs` gauge must be maintained
+/// by an incremental counter (no `BlobStore::list()` scan per scrape),
+/// incrementing on a blob put and decrementing on a blob delete.
+#[tokio::test]
+async fn storage_blob_gauge_increments_on_put_and_decrements_on_delete() {
+    let app = instrumented_app();
+
+    // Start at 0.
+    let (_, body) = body_string(&app, "/metrics").await;
+    assert_eq!(storage_blobs_value(&body), 0, "empty store");
+
+    // Put two distinct blobs → gauge is 2.
+    let d1 = put_blob(&app, b"blob-one").await;
+    let _d2 = put_blob(&app, b"blob-two").await;
+    let (_, body) = body_string(&app, "/metrics").await;
+    assert_eq!(storage_blobs_value(&body), 2, "after two puts");
+
+    // Delete one → gauge is 1.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri(format!("/v2/repo/blobs/{d1}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("delete blob");
+    assert_eq!(resp.status(), StatusCode::ACCEPTED, "blob delete");
+    let (_, body) = body_string(&app, "/metrics").await;
+    assert_eq!(storage_blobs_value(&body), 1, "after one delete");
+}
+
+/// F7 regression: `/metrics` requests are themselves counted under the
+/// `metrics` handler label — the middleware is layered *over* the merged
+/// `/metrics` route, not under it.
+#[tokio::test]
+async fn metrics_endpoint_is_self_counted() {
+    let app = instrumented_app();
+
+    // First scrape records nothing about `/metrics` yet (it is observed
+    // only after it completes), so issue two scrapes: the second sees the
+    // first counted.
+    let _ = body_string(&app, "/metrics").await;
+    let (_, body) = body_string(&app, "/metrics").await;
+
+    let counted = body.lines().any(|line| {
+        line.starts_with("ferrooci_http_requests_total")
+            && line.contains(r#"handler="metrics""#)
+            && line.contains(r#"method="GET""#)
+            && line.contains(r#"status="200""#)
+    });
+    assert!(
+        counted,
+        "expected /metrics scrape to be self-counted under handler=\"metrics\", got:\n{body}"
     );
 }

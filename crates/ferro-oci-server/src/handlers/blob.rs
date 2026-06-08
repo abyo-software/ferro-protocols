@@ -147,5 +147,6 @@ pub async fn delete_blob(state: &AppState, name: &str, digest_str: &str) -> Resp
     if let Err(e) = state.blob_store.delete(&digest).await {
         return OciError::from(e).into_response();
     }
+    state.dec_blob_count();
     (StatusCode::ACCEPTED, HeaderMap::new()).into_response()
 }

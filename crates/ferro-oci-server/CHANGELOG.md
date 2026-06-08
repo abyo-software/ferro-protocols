@@ -8,6 +8,48 @@ releases. Breaking changes will be released as a separate `v0.2.0`.
 
 ## [Unreleased]
 
+### Security
+- **Manifest `PUT` by digest now verifies the digest matches the body.**
+  `PUT /v2/{name}/manifests/sha256:<D>` previously computed the manifest
+  digest but never compared it against a digest *reference* in the URL,
+  so a client could push bytes hashing to `<D2>` under the key `<D1>`
+  and corrupt content-addressing. A mismatch is now rejected with
+  `400 DIGEST_INVALID`; a matching by-digest push still returns `201`.
+- **Per-session upload size cap bounds a memory-exhaustion DoS.** Chunked
+  blob uploads accumulated in an unbounded in-memory buffer, so an
+  unauthenticated client could open sessions and append sub-limit chunks
+  until RAM was exhausted. Each upload session is now bounded at
+  `MAX_UPLOAD_SESSION_BYTES` (4 GiB default; overridable per `AppState`
+  via `with_max_upload_session_bytes`). A chunk that would exceed the cap
+  is rejected with `413 Payload Too Large` (`BLOB_UPLOAD_INVALID`) and the
+  session buffer is dropped immediately. *Follow-up (deferred):* the
+  session store still keeps uploads wholly in RAM; spooling large uploads
+  to disk and expiring idle sessions are larger refactors tracked
+  separately — the size cap closes the unbounded-growth DoS now.
+- **PATCH `Content-Range` length is now validated against the body.** A
+  chunk PATCH validated only the range *start*, ignoring the *end*, so a
+  request claiming `Content-Range: 0-999999` while sending one byte was
+  accepted. The inclusive range length (`end - start + 1`) must now equal
+  the body length, else `416 Range Not Satisfiable` (`BLOB_UPLOAD_INVALID`).
+
+### Changed
+- **Explicit request body limit (`MAX_BODY_BYTES`, 512 MiB) on the
+  `/v2/**` surface.** Axum's 2 MiB `DefaultBodyLimit` silently rejected
+  manifests and blob chunks larger than 2 MiB; the OCI spec expects
+  registries to accept manifests of at least 4 MiB. The limit is raised
+  to 512 MiB (consistent with, and below, the per-session upload cap).
+- **`/metrics` scrapes no longer trigger an O(blobs) filesystem scan.**
+  The `ferrooci_storage_blobs` gauge was refreshed by calling
+  `BlobStore::list()` on every scrape, turning an open `/metrics`
+  endpoint into O(number-of-blobs) FS work per request. The gauge is now
+  fed by an O(1) atomic blob counter on `AppState`, incremented on blob
+  put and decremented on blob delete. The gauge honestly measures "blobs
+  written via this server instance".
+- **`/metrics` requests are now themselves instrumented.** The tracking
+  middleware is layered *over* the merged `/metrics` route (previously
+  under it), so a `/metrics` scrape is counted under the `metrics`
+  handler label that `Metrics::handler_for` already emitted.
+
 ### Added
 - **Prometheus `/metrics` endpoint + request instrumentation.** New
   `metrics` module exposes a `GET /metrics` route (Prometheus text

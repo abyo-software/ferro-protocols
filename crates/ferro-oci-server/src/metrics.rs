@@ -33,6 +33,8 @@
 //! size" panel therefore reads `0` until a size-reporting backend is
 //! wired; the blob-count gauge is the one to trust today.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Instant;
 
 use axum::Router;
@@ -47,8 +49,6 @@ use prometheus::{
     register_histogram_vec_with_registry, register_int_counter_vec_with_registry,
     register_int_gauge_with_registry,
 };
-
-use ferro_blob_store::SharedBlobStore;
 
 /// Histogram buckets (seconds) tuned for a registry: sub-millisecond
 /// metadata reads up to multi-second blob transfers.
@@ -190,18 +190,17 @@ impl Metrics {
         }
     }
 
-    /// Refresh the storage gauges from the blob store.
+    /// Refresh the storage gauges from the incremental blob counter.
     ///
-    /// Counts the blobs the store currently holds. Errors are swallowed
-    /// (the gauge simply keeps its previous value) so a transient store
-    /// hiccup never fails a scrape.
-    pub async fn refresh_storage(&self, store: &SharedBlobStore) {
-        if let Ok(digests) = store.list().await {
-            // i64 is the gauge type; a blob count overflowing i64 is not
-            // physically reachable, but clamp defensively all the same.
-            let n = i64::try_from(digests.len()).unwrap_or(i64::MAX);
-            self.storage_blobs.set(n);
-        }
+    /// Reads the O(1) atomic blob count maintained by the blob handlers
+    /// (see [`crate::router::AppState`]) rather than performing an
+    /// O(number-of-blobs) `BlobStore::list()` filesystem scan on every
+    /// scrape — an open `/metrics` endpoint must not amplify into heavy
+    /// storage work. The gauge reports "blobs written via this server
+    /// instance"; see the `AppState::blob_count` field docs for the exact
+    /// best-effort semantics.
+    pub fn refresh_storage(&self, blob_count: i64) {
+        self.storage_blobs.set(blob_count);
     }
 
     /// Render the registry in the Prometheus text exposition format.
@@ -229,8 +228,11 @@ impl Default for Metrics {
 pub struct MetricsState {
     /// The metric handles.
     pub metrics: Metrics,
-    /// Blob store, sampled on each `/metrics` scrape for the storage gauges.
-    pub blob_store: SharedBlobStore,
+    /// Incremental blob counter, read on each `/metrics` scrape for the
+    /// `ferrooci_storage_blobs` gauge. Shared with
+    /// [`crate::router::AppState`] so the count the handlers maintain is
+    /// the count the scrape reports — no filesystem scan required.
+    pub blob_count: Arc<AtomicI64>,
 }
 
 /// Axum middleware: record count + latency + in-flight for every request.
@@ -286,7 +288,9 @@ fn method_label(method: &Method) -> &'static str {
 /// `GET /metrics` handler — refreshes the storage gauges, then renders
 /// the registry in the Prometheus text exposition format.
 async fn metrics_handler(State(state): State<MetricsState>) -> Response {
-    state.metrics.refresh_storage(&state.blob_store).await;
+    state
+        .metrics
+        .refresh_storage(state.blob_count.load(Ordering::Relaxed));
     let body = state.metrics.encode();
     (
         StatusCode::OK,
@@ -312,19 +316,19 @@ pub fn metrics_routes(state: MetricsState) -> Router {
 
 /// Wrap `app` so every request is instrumented and `/metrics` is served.
 ///
-/// The middleware records count/latency/in-flight on `app`'s routes; the
-/// merged `/metrics` route renders them. `blob_store` is sampled on each
+/// The `/metrics` route is merged into `app` *before* the tracking
+/// middleware is layered over the combined router, so a `/metrics` scrape
+/// is itself counted under the `metrics` handler label (matching the
+/// label emitted by [`Metrics::handler_for`]). `blob_count` is the shared
+/// incremental counter (from [`crate::router::AppState`]) read on each
 /// scrape for the storage gauges.
-pub fn instrument(app: Router, metrics: Metrics, blob_store: SharedBlobStore) -> Router {
+pub fn instrument(app: Router, metrics: Metrics, blob_count: Arc<AtomicI64>) -> Router {
     let state = MetricsState {
         metrics,
-        blob_store,
+        blob_count,
     };
-    app.layer(axum::middleware::from_fn_with_state(
-        state.clone(),
-        track_metrics,
-    ))
-    .merge(metrics_routes(state))
+    app.merge(metrics_routes(state.clone()))
+        .layer(axum::middleware::from_fn_with_state(state, track_metrics))
 }
 
 #[cfg(test)]

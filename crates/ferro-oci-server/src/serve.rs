@@ -105,11 +105,12 @@ impl Config {
 /// Prometheus instrumentation middleware and `/metrics` endpoint.
 pub fn build_app(blob_store: SharedBlobStore) -> axum::Router {
     let registry = Arc::new(InMemoryRegistryMeta::new());
-    let state = AppState::new(blob_store.clone(), registry);
+    let state = AppState::new(blob_store, registry);
+    let blob_count = state.blob_count_handle();
     instrument(
         router(state).merge(probe_routes()),
         Metrics::new(),
-        blob_store,
+        blob_count,
     )
 }
 
