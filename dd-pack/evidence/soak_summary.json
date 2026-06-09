@@ -1,0 +1,21 @@
+{
+  "target": "ferro-oci-server",
+  "instance": "i-0d5e60937b218c7f7",
+  "type": "c7g.xlarge (aarch64)",
+  "region": "ap-northeast-1",
+  "ami": "al2023-ami arm64 (ami-0eaac7db2f336c8cd)",
+  "workload": "OCI push/pull (POST upload + monolithic blob PUT + manifest PUT + manifest GET + blob GET), 50 rps, bounded 2000-artifact working set (steady-state)",
+  "duration_h": 24.0,
+  "iterations": 4306902,
+  "errors": 0,
+  "dropped": 0,
+  "latency_p50_ms": {"median": 0.41, "min": 0.34, "max": 0.44},
+  "latency_p99_ms": {"median": 7.88, "min": 7.72, "max": 8.44, "p99_of_p99": 8.12},
+  "rss_kb": {"p50": 73596, "p99": 80200, "p99_vs_p50_spread_pct": 8.97,
+             "Q1_mean": 74496, "Q4_mean": 72335, "Q4_vs_Q1_trend_pct": -2.90},
+  "fd_count": {"min": 10, "max": 12},
+  "thread_count": {"min": 5, "max": 9},
+  "verdict": "PASS",
+  "notes": "0 dropped over 24h. RSS plateau: Q4-vs-Q1 trend -2.90% (memory CONTRACTED = no leak; same shape as ferro-heartbeat -2.3%). p99 latency steady (median 7.88ms, max 8.44ms). server.log empty (0 warnings). The 8.97% p99-vs-p50 RSS spread is transient snapshot-write allocation peaks (durable persistence writes metadata.json), NOT trend/leak. Instance terminated post-pull.",
+  "cost_estimate_usd": 3.7
+}
