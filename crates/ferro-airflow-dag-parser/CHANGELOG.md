@@ -8,6 +8,46 @@ public API require a major bump.
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-06-16
+
+Security (recursion-DoS hardening). No public-API change — additive, fully
+semver-compatible.
+
+### Security
+- **Closed a parser stack-overflow DoS (FP5).** Parsing attacker-controlled
+  Python could overflow the vendored `littrs-ruff-python-parser` 0.6.2
+  recursive-descent parser, aborting the host process with a `SIGSEGV`
+  (`catch_unwind` cannot intercept a guard-page fault). The previous
+  pre-screen capped only bracket nesting (32) and *consecutive* single-operator
+  runs (64), so the non-bracket recursion vectors — `not`/`await` keyword
+  chains, `~`/`-`/`+` runs, right-associative `a**b**c`, `a if b else …`
+  conditional / `lambda:` chains, deeply nested compound statements,
+  *mixed* prefix-operator chains (fuzz Finding 2, `crash-0665b68…`),
+  `yield`/`yield from` chains, and `async async … def` error-recovery chains —
+  slipped through and overflowed the parser. The last three were surfaced by
+  the adversarial design-review (Codex DD) convergence pass and closed by
+  counting `Yield`/`From`/`Async` in the lexer recursion metric.
+
+  The fix ports FerroAir's complete three-layer recursion guard
+  (`ferroair-dag-parser`, FA1) into `panic_safe.rs`: (1) an iterative bracket
+  pre-scan (cap 256), (2) a single real-tokenizer pass that bounds combined
+  expression recursion (`brackets + operator-run + per-line right-recursion +
+  indent`, cap 1024) and rejects PEP-750 t-strings (which the parser panics
+  on), and (3) execution of the parse **and** AST walk on a dedicated 128 MiB
+  stack so the numeric cap — not the caller's ~2 MiB stack — is the binding
+  limit. The recursive AST walkers (`collect_shift_edges`, `stringify_expr`,
+  `resolve_to_task_id`, …) additionally truncate past a 1024 depth so a deep
+  left-leaning `>>` / attribute / call chain that survives the parser cannot
+  overflow the walk either.
+
+  This is not a claim of bulletproof input handling — see
+  `dd-pack/11-known-limitations.md` for the honest residual (a single
+  left-leaning chain of hundreds of thousands of trailers in a multi-MB file
+  can still overflow on recursive AST construction/drop, bounded by the
+  128 MiB stack). The realistic FP5 parser-recursion shapes (each well under
+  4 KiB) are fully closed, with regression tests under `tests/stack_safety.rs`
+  and an adversarial design-review (Codex DD) convergence pass.
+
 ## [1.0.0] - 2026-06-08
 
 First semver-stable release; the public API is committed under semver.

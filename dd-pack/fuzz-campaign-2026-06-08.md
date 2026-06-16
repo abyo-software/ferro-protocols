@@ -33,7 +33,22 @@ coordinate field now rejects whole-segment `.`/`..` components (new
 tests + the crash input tracked as a permanent known-crash seed. Verified: crashes
 before the fix, passes after.
 
-## Finding 2 — airflow `dynamic_markers` stack-overflow (TRIAGED — deferred to ferro-air)
+## Finding 2 — airflow `dynamic_markers` stack-overflow — ✅ CLOSED (v1.0.1, 2026-06-16)
+
+> **Closure (2026-06-16, ferro-airflow-dag-parser v1.0.1):** the source fix is
+> no longer deferred. FerroAir's complete three-layer recursion guard was
+> ported into `panic_safe.rs` — bracket pre-scan (cap 256) + a single
+> real-tokenizer pass bounding `brackets + op_run + line_right_rec + indent`
+> (cap 1024, with `op_run` counting a run across *all* mixed prefix operators
+> so the alternating `-`/`not`/`[` shape below no longer slips through) +
+> parse/walk on a dedicated 128 MiB stack. The recursive AST walkers also
+> truncate past depth 1024. The exact crash seed (`crash-0665b68…`) now returns
+> gracefully. Regression tests: `tests/stack_safety.rs`. Honest residual
+> (deep-chain AST drop on multi-MB input) is recorded in
+> `dd-pack/11-known-limitations.md` §FP5. The triage below is retained for the
+> historical record.
+
+### (historical triage)
 
 Input: ~1500 bytes alternating ~30-char runs of unary `-` with `not` keywords and `[`.
 `dynamic_markers_for` → `dynamic_markers.rs:157 parse_module_safely(source)?` DOES

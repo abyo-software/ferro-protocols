@@ -1,5 +1,18 @@
 # airflow_dag_extract — 7 crash inputs, 1 upstream bug
 
+> **Status (2026-06-16, ferro-airflow-dag-parser v1.0.1): ✅ HANDLED.** All 7
+> crash inputs here hit the upstream `expression.rs:1633` **t-/f-string panic**
+> (an *unwinding* panic, not a stack overflow). They are now (a) rejected
+> pre-parse by the lexer pass (PEP-750 t-strings) where applicable, and (b)
+> otherwise caught by the shield's `catch_unwind` / thread-`join` and folded
+> into `ParseError::Internal` — never a process abort. The separate
+> **stack-overflow** recursion DoS (FP5 / fuzz Finding 2, including the
+> `not`/`-`/`[` mixed-prefix `crash-0665b68…` seed) is also closed in v1.0.1
+> by the ported three-layer recursion guard; see
+> `dd-pack/11-known-limitations.md` §FP5 and `dd-pack/fuzz-campaign-2026-06-08.md`
+> Finding 2. The OOM `*-falsepos-*` seeds in this directory remain benign
+> records (libFuzzer RSS-accounting artifacts, not real OOMs).
+
 **Date**: 2026-05-03 (extended ad-hoc fuzz wave, post-SSD-install)
 **Target**: `ferro-protocols/fuzz/fuzz_targets/airflow_dag_extract.rs`
 **Time-to-first-crash**: 35 seconds (cold-start with 15,530-file corpus)

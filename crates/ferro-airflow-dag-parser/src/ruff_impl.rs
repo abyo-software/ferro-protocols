@@ -23,6 +23,24 @@ const DAG_NAMES: &[&str] = &["DAG"];
 const DAG_DECORATOR_NAMES: &[&str] = &["dag"];
 const SETTER_METHODS: &[&str] = &["set_upstream", "set_downstream"];
 
+/// Maximum depth the recursive AST walkers descend before truncating.
+///
+/// `collect_shift_edges`, `terminal_task_ids`, `resolve_to_task_id`,
+/// `stringify_expr`, and the decorator `inner_name` walk left-leaning
+/// chains — `a >> b >> …` (shift), `a.b.c…` (attribute), `f()()…`
+/// (call) — that the parser builds *iteratively*, so the resulting tree
+/// can be far deeper than any expression the lexer-pass recursion cap in
+/// `panic_safe.rs` bounds (that cap counts brackets / prefix-operator
+/// runs / indent, none of which a left-leaning binary or trailer chain
+/// accumulates). A deep-but-cap-admitted attribute chain
+/// (`schedule=a.a.a…`, ~200 k deep) overflowed `stringify_expr` even on
+/// the 128 MiB parse stack (Codex DD, 2026-06-16). Past this depth the
+/// walk degrades gracefully — a sentinel string / dropped edge / `None` —
+/// rather than aborting the process. `1024` clears any real DAG (the
+/// longest realistic `>>` chain is a few hundred tasks) by a wide margin
+/// and sits far below the overflow point.
+const MAX_WALK_DEPTH: usize = 1024;
+
 /// Parse `source` and return all DAGs found.
 ///
 /// # Errors
@@ -32,6 +50,16 @@ const SETTER_METHODS: &[&str] = &["set_upstream", "set_downstream"];
 /// `dag_id` / `task_id` literal violates Airflow's 250-char / safe-charset
 /// rule.
 pub fn extract_all(source: &str) -> Result<Vec<ExtractedDag>, ParseError> {
+    // Run the whole parse + recursive AST walk inside the stack-safety
+    // shield: the two pre-scans reject pathologically nested input before
+    // the parser runs, and the 128 MiB dedicated stack bounds both the
+    // parser's recursive descent and this `Walker`'s recursion (the
+    // `>>` / attribute / call chains it walks would otherwise overflow a
+    // small caller stack on a deep-but-cap-admitted tree).
+    crate::panic_safe::shield_parser_panic("ruff", source, || extract_all_inner(source))
+}
+
+fn extract_all_inner(source: &str) -> Result<Vec<ExtractedDag>, ParseError> {
     let parsed = parse_module_safely(source)?;
     let module: &ModModule = parsed.syntax();
     let line_index = LineIndex::new(source);
@@ -211,7 +239,7 @@ impl Walker<'_> {
             && (matches!(op, Operator::RShift | Operator::LShift))
             && let Some(idx) = dag_idx
         {
-            self.collect_shift_edges(left, *op, right, idx);
+            self.collect_shift_edges(left, *op, right, idx, 0);
             return Ok(());
         }
         if let Expr::Call(call) = expr
@@ -219,9 +247,9 @@ impl Walker<'_> {
             && SETTER_METHODS.contains(&attr.as_str())
             && let Some(idx) = dag_idx
         {
-            let lhs = self.resolve_to_task_id(value);
+            let lhs = self.resolve_to_task_id(value, 0);
             for arg in &call.arguments.args {
-                let rhs = self.resolve_to_task_id(arg);
+                let rhs = self.resolve_to_task_id(arg, 0);
                 if let (Some(l), Some(r)) = (lhs.clone(), rhs) {
                     if attr.as_str() == "set_downstream" {
                         push_unique_edge(&mut self.dags[idx].deps_edges, (l.clone(), r));
@@ -234,9 +262,23 @@ impl Walker<'_> {
         Ok(())
     }
 
-    fn collect_shift_edges(&mut self, left: &Expr, op: Operator, right: &Expr, dag_idx: usize) {
-        let left_terms = self.terminal_task_ids(left, op);
-        let right_terms = self.terminal_task_ids(right, op);
+    fn collect_shift_edges(
+        &mut self,
+        left: &Expr,
+        op: Operator,
+        right: &Expr,
+        dag_idx: usize,
+        depth: usize,
+    ) {
+        // Stack-safety: a `a >> b >> c >> …` spine recurses once per `>>`.
+        // The parser builds it iteratively, so the tree is far deeper than
+        // the lexer cap bounds; truncate past MAX_WALK_DEPTH rather than
+        // overflow the parse stack.
+        if depth > MAX_WALK_DEPTH {
+            return;
+        }
+        let left_terms = self.terminal_task_ids(left, op, depth);
+        let right_terms = self.terminal_task_ids(right, op, depth);
         for l in &left_terms {
             for r in &right_terms {
                 let edge = if matches!(op, Operator::RShift) {
@@ -255,30 +297,33 @@ impl Walker<'_> {
         }) = left
             && matches!(op2, Operator::RShift | Operator::LShift)
         {
-            self.collect_shift_edges(l2, *op2, r2, dag_idx);
+            self.collect_shift_edges(l2, *op2, r2, dag_idx, depth + 1);
         }
     }
 
-    fn terminal_task_ids(&self, expr: &Expr, parent_op: Operator) -> Vec<TaskId> {
+    fn terminal_task_ids(&self, expr: &Expr, parent_op: Operator, depth: usize) -> Vec<TaskId> {
+        if depth > MAX_WALK_DEPTH {
+            return Vec::new();
+        }
         if let Expr::BinOp(ExprBinOp {
             left: _, op, right, ..
         }) = expr
             && matches!(op, Operator::RShift | Operator::LShift)
         {
             let _ = parent_op;
-            return self.terminal_task_ids(right, *op);
+            return self.terminal_task_ids(right, *op, depth + 1);
         }
         let mut out = Vec::new();
         match expr {
             Expr::List(ast::ExprList { elts, .. }) | Expr::Tuple(ast::ExprTuple { elts, .. }) => {
                 for elt in elts {
-                    if let Some(id) = self.resolve_to_task_id(elt) {
+                    if let Some(id) = self.resolve_to_task_id(elt, depth + 1) {
                         out.push(id);
                     }
                 }
             }
             other => {
-                if let Some(id) = self.resolve_to_task_id(other) {
+                if let Some(id) = self.resolve_to_task_id(other, depth + 1) {
                     out.push(id);
                 }
             }
@@ -286,7 +331,10 @@ impl Walker<'_> {
         out
     }
 
-    fn resolve_to_task_id(&self, expr: &Expr) -> Option<TaskId> {
+    fn resolve_to_task_id(&self, expr: &Expr, depth: usize) -> Option<TaskId> {
+        if depth > MAX_WALK_DEPTH {
+            return None;
+        }
         match expr {
             Expr::Name(ExprName { id, .. }) => self
                 .task_aliases
@@ -298,8 +346,10 @@ impl Walker<'_> {
             // receiver / callee. Resolving a bare `Name` callee picks
             // up `@task`-decorated functions registered as aliases of
             // themselves.
-            Expr::Call(call) => self.resolve_to_task_id(&call.func),
-            Expr::Attribute(ExprAttribute { value, .. }) => self.resolve_to_task_id(value),
+            Expr::Call(call) => self.resolve_to_task_id(&call.func, depth + 1),
+            Expr::Attribute(ExprAttribute { value, .. }) => {
+                self.resolve_to_task_id(value, depth + 1)
+            }
             _ => None,
         }
     }
@@ -329,7 +379,7 @@ fn merge_dag_kwargs(dag: &mut ExtractedDag, call: &ExprCall) -> Result<(), Parse
                 }
             }
             "schedule" | "schedule_interval" | "timetable" => {
-                dag.schedule = Some(stringify_expr(&kw.value));
+                dag.schedule = Some(stringify_expr(&kw.value, 0));
             }
             "default_args" => {
                 dag.has_default_args = true;
@@ -378,16 +428,22 @@ fn match_dag_decorator(expr: &Expr) -> Option<DagDecoratorMatch<'_>> {
 }
 
 fn is_task_decorator(expr: &Expr) -> bool {
-    fn inner_name(expr: &Expr) -> Option<&str> {
+    // Stack-safety: a `@a()()()…`-style decorator recurses one frame per
+    // call into `inner_name`; truncate past MAX_WALK_DEPTH (such a
+    // decorator is not a task decorator anyway).
+    fn inner_name(expr: &Expr, depth: usize) -> Option<&str> {
+        if depth > MAX_WALK_DEPTH {
+            return None;
+        }
         match expr {
             Expr::Name(ExprName { id, .. }) => Some(id.as_str()),
             Expr::Attribute(ExprAttribute { attr, .. }) => Some(attr.as_str()),
-            Expr::Call(call) => inner_name(&call.func),
+            Expr::Call(call) => inner_name(&call.func, depth + 1),
             _ => None,
         }
     }
     matches!(
-        inner_name(expr),
+        inner_name(expr, 0),
         Some("task" | "task_group" | "setup" | "teardown" | "sensor" | "short_circuit")
     )
 }
@@ -411,7 +467,15 @@ fn constant_str(expr: &Expr) -> Option<String> {
     None
 }
 
-fn stringify_expr(expr: &Expr) -> String {
+fn stringify_expr(expr: &Expr, depth: usize) -> String {
+    // Stack-safety: `a.b.c…` / `f()()…` recurse one frame per attribute /
+    // call. The parser builds these iteratively, so the chain can be
+    // hundreds of thousands deep within a few-hundred-KiB file and
+    // overflow even the 128 MiB parse stack (Codex DD, 2026-06-16).
+    // Truncate past MAX_WALK_DEPTH with a sentinel rather than abort.
+    if depth > MAX_WALK_DEPTH {
+        return "<deep>".to_string();
+    }
     match expr {
         Expr::StringLiteral(ExprStringLiteral { value, .. }) => value.to_str().to_string(),
         Expr::NoneLiteral(_) => "None".to_string(),
@@ -423,10 +487,10 @@ fn stringify_expr(expr: &Expr) -> String {
         },
         Expr::Name(ExprName { id, .. }) => id.as_str().to_string(),
         Expr::Attribute(ExprAttribute { value, attr, .. }) => {
-            format!("{}.{}", stringify_expr(value), attr.as_str())
+            format!("{}.{}", stringify_expr(value, depth + 1), attr.as_str())
         }
         Expr::Call(call) => {
-            let func = stringify_expr(&call.func);
+            let func = stringify_expr(&call.func, depth + 1);
             format!("{func}(...)")
         }
         _ => "<expr>".to_string(),
