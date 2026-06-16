@@ -154,6 +154,17 @@ const TASK_DECORATORS: &[&str] = &[
 ///
 /// Returns [`ParseError::Parse`] when ruff cannot parse the source.
 pub fn detect_dynamic_markers(source: &str) -> Result<Vec<DynamicMarker>, ParseError> {
+    // Same stack-safety shield as the static extractor: the marker
+    // detector parses the source a second time and walks it with its own
+    // recursive `MarkerVisitor`, so it must run on the large dedicated
+    // stack behind the same pre-scan caps — a deeply nested DAG that
+    // survived the static path would otherwise crash here.
+    crate::panic_safe::shield_parser_panic("ruff-markers", source, || {
+        detect_dynamic_markers_impl(source)
+    })
+}
+
+fn detect_dynamic_markers_impl(source: &str) -> Result<Vec<DynamicMarker>, ParseError> {
     let parsed = parse_module_safely(source)?;
     let module: &ModModule = parsed.syntax();
     let line_index = LineIndex::new(source);
@@ -424,16 +435,28 @@ fn is_dag_callable(expr: &Expr) -> bool {
     }
 }
 
+/// Stack-safety cap for the decorator-callee chain walk below. A
+/// `@dag()()()…` / `@task()()()…` decorator builds a left-leaning call
+/// chain the parser produces iteratively, so it is not bounded by the
+/// lexer recursion cap; truncate past this depth (such a decorator is not
+/// a `@dag` / `@task` decorator anyway). Mirrors `ruff_impl`'s
+/// `MAX_WALK_DEPTH` so both decorator paths are bounded identically
+/// (Codex DD R8, 2026-06-16).
+const MAX_DECORATOR_CHAIN_DEPTH: usize = 1024;
+
 fn match_dag_decorator(expr: &Expr) -> bool {
-    fn inner(expr: &Expr) -> Option<&str> {
+    fn inner(expr: &Expr, depth: usize) -> Option<&str> {
+        if depth > MAX_DECORATOR_CHAIN_DEPTH {
+            return None;
+        }
         match expr {
             Expr::Name(ExprName { id, .. }) => Some(id.as_str()),
             Expr::Attribute(ExprAttribute { attr, .. }) => Some(attr.as_str()),
-            Expr::Call(call) => inner(&call.func),
+            Expr::Call(call) => inner(&call.func, depth + 1),
             _ => None,
         }
     }
-    matches!(inner(expr), Some(name) if DAG_DECORATOR_NAMES.contains(&name))
+    matches!(inner(expr, 0), Some(name) if DAG_DECORATOR_NAMES.contains(&name))
 }
 
 fn callee_is_chain_helper(expr: &Expr) -> bool {
@@ -454,15 +477,18 @@ fn is_operator_constructor(expr: &Expr) -> bool {
 }
 
 fn is_task_decorator_call(call: &ExprCall) -> bool {
-    fn inner(expr: &Expr) -> Option<&str> {
+    fn inner(expr: &Expr, depth: usize) -> Option<&str> {
+        if depth > MAX_DECORATOR_CHAIN_DEPTH {
+            return None;
+        }
         match expr {
             Expr::Name(ExprName { id, .. }) => Some(id.as_str()),
             Expr::Attribute(ExprAttribute { attr, .. }) => Some(attr.as_str()),
-            Expr::Call(c) => inner(&c.func),
+            Expr::Call(c) => inner(&c.func, depth + 1),
             _ => None,
         }
     }
-    matches!(inner(&call.func), Some(name) if TASK_DECORATORS.contains(&name))
+    matches!(inner(&call.func, 0), Some(name) if TASK_DECORATORS.contains(&name))
 }
 
 /// Conservative: anything that is not `@task()` (zero-arg) is considered

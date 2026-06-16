@@ -29,7 +29,9 @@ use ferro_airflow_dag_parser::{
 // ---------------------------------------------------------------------------
 
 fn dag_id_of(dag: &ExtractedDag) -> Option<&str> {
-    dag.dag_id.as_ref().map(ferro_airflow_dag_parser::DagId::as_str)
+    dag.dag_id
+        .as_ref()
+        .map(ferro_airflow_dag_parser::DagId::as_str)
 }
 
 fn task_id_strings(dag: &ExtractedDag) -> Vec<&str> {
@@ -82,7 +84,10 @@ fn dag_id_one_over_max_len_is_rejected() {
     match err {
         ParseError::InvalidIdentifier { kind, reason, .. } => {
             assert_eq!(kind, "dag_id");
-            assert!(reason.contains("251"), "reason should report length 251: {reason}");
+            assert!(
+                reason.contains("251"),
+                "reason should report length 251: {reason}"
+            );
         }
         other => panic!("expected InvalidIdentifier, got {other:?}"),
     }
@@ -91,32 +96,35 @@ fn dag_id_one_over_max_len_is_rejected() {
 #[test]
 fn task_id_at_exact_max_len_is_accepted() {
     let id = "t".repeat(250);
-    let src = format!(
-        "with DAG(dag_id=\"d\"):\n    x = BashOperator(task_id=\"{id}\")\n"
-    );
+    let src = format!("with DAG(dag_id=\"d\"):\n    x = BashOperator(task_id=\"{id}\")\n");
     let dags = extract_all_static_dags(&src).expect("250-char task_id must be accepted");
     assert_eq!(task_id_strings(&dags[0]), vec![id.as_str()]);
 }
 
 // ===========================================================================
-// panic_safe.rs — bracket-depth and unary-op caps (reached via extractor)
+// panic_safe.rs — stack-safety caps (reached via the public extractor)
+//
+// The guard is two-layer (see `src/panic_safe.rs`): an iterative bracket
+// pre-scan with cap `MAX_PARSE_NESTING_DEPTH = 256`, and a lexer pass with
+// the combined-recursion cap `MAX_PARSE_RECURSION = 1024` that also catches
+// non-bracket recursion (`not`/`await`/`**`/conditional/`lambda`/indent).
+// These integration tests pin the observable boundary through the public
+// API so a `>`/`>=`/`==` mutation of either cap comparison dies.
 // ===========================================================================
 
 #[test]
 fn bracket_depth_exactly_at_cap_passes() {
-    // MAX_BRACKET_DEPTH is 32. A depth of exactly 32 must NOT be
-    // rejected (`depth > limit` is false at 32). The `>=` mutant would
-    // reject this; the `==` mutant would only reject at exactly 33 (so
-    // a depth-33 input below distinguishes it from `>`).
-    let src = format!("x = {}1{}\n", "(".repeat(32), ")".repeat(32));
-    // Either parses cleanly or fails for a *non-bracket* reason — but it
-    // must not be rejected by the bracket pre-screen.
+    // Depth of exactly 256 (the bracket cap) must NOT be rejected
+    // (`depth > cap` is false at 256). The `>=` mutant would reject this.
+    let src = format!("x = {}1{}\n", "(".repeat(256), ")".repeat(256));
+    // Either parses cleanly or fails for a *non-cap* reason — but it must
+    // not be rejected by the nesting pre-screen.
     match extract_all_static_dags(&src) {
         Ok(_) => {}
         Err(ParseError::Parse(msg)) => {
             assert!(
-                !msg.contains("bracket nesting depth"),
-                "depth-32 must not trip the bracket cap: {msg}"
+                !msg.contains("nesting depth"),
+                "depth-256 must not trip the nesting cap: {msg}"
             );
         }
         Err(other) => panic!("unexpected error: {other:?}"),
@@ -125,15 +133,14 @@ fn bracket_depth_exactly_at_cap_passes() {
 
 #[test]
 fn bracket_depth_one_over_cap_rejected() {
-    // Depth 33 = first depth strictly greater than 32. Kills `> -> ==`
-    // (which would only fire at exactly 33 — actually identical here, so
-    // we also assert the deeper case below) and `> -> >=`.
-    let src = format!("x = {}1{}\n", "(".repeat(33), ")".repeat(33));
-    let err = extract_all_static_dags(&src).expect_err("depth 33 must be rejected");
+    // Depth 257 = first depth strictly greater than 256. Kills `> -> >=`
+    // (which would admit 257) by requiring rejection here.
+    let src = format!("x = {}1{}\n", "(".repeat(257), ")".repeat(257));
+    let err = extract_all_static_dags(&src).expect_err("depth 257 must be rejected");
     match err {
         ParseError::Parse(msg) => assert!(
-            msg.contains("bracket nesting depth"),
-            "expected bracket-cap message: {msg}"
+            msg.contains("nesting depth") && msg.contains("256"),
+            "expected nesting-cap message: {msg}"
         ),
         other => panic!("expected Parse, got {other:?}"),
     }
@@ -141,15 +148,15 @@ fn bracket_depth_one_over_cap_rejected() {
 
 #[test]
 fn bracket_depth_far_over_cap_rejected() {
-    // Depth 200 (>> 32). Kills `> -> ==` (the `==` variant only fires at
-    // exactly 33, so a depth-200 unbalanced opener would slip through
-    // it but is caught by the real `>` operator).
-    let src = "(".repeat(200);
-    let err = extract_all_static_dags(&src).expect_err("depth 200 must be rejected");
+    // Depth 4096 (>> 256), unbalanced openers. Kills `> -> ==` (the `==`
+    // variant only fires at exactly 257, so a depth-4096 input would slip
+    // through it) — the real `>` operator rejects everything above 256.
+    let src = "(".repeat(4096);
+    let err = extract_all_static_dags(&src).expect_err("depth 4096 must be rejected");
     match err {
         ParseError::Parse(msg) => assert!(
-            msg.contains("bracket nesting depth"),
-            "expected bracket-cap message: {msg}"
+            msg.contains("nesting depth"),
+            "expected nesting-cap message: {msg}"
         ),
         other => panic!("expected Parse, got {other:?}"),
     }
@@ -157,18 +164,18 @@ fn bracket_depth_far_over_cap_rejected() {
 
 #[test]
 fn closing_brackets_reduce_depth_so_balanced_input_passes() {
-    // 40 balanced open/close *pairs* never nested deeper than 1. Kills
+    // 400 balanced open/close *pairs* never nested deeper than 1. Kills
     // the "delete match arm `)` `]` `}`" mutant: without the closing arm
-    // depth would climb to 40 ( > 32 ) and be wrongly rejected.
+    // depth would climb to 400 ( > 256 ) and be wrongly rejected.
     let mut src = String::from("x = ");
-    for _ in 0..40 {
+    for _ in 0..400 {
         src.push_str("(1)");
     }
     src.push('\n');
     match extract_all_static_dags(&src) {
         Ok(_) => {}
         Err(ParseError::Parse(msg)) => assert!(
-            !msg.contains("bracket nesting depth"),
+            !msg.contains("nesting depth"),
             "balanced brackets must not trip the cap: {msg}"
         ),
         Err(other) => panic!("unexpected error: {other:?}"),
@@ -176,30 +183,47 @@ fn closing_brackets_reduce_depth_so_balanced_input_passes() {
 }
 
 #[test]
-fn unary_op_run_exactly_at_cap_passes() {
-    // MAX_UNARY_OP_RUN is 64. A run of exactly 64 `-` must NOT be
-    // rejected (`run > limit` false at 64). Kills `> -> >=`.
-    let src = format!("x = {}1\n", "-".repeat(64));
+fn recursion_run_exactly_at_cap_passes() {
+    // A run of exactly 1024 `-` (combined recursion depth = 1024) must NOT
+    // be rejected (`max > cap` false at 1024). Kills `> -> >=`.
+    let src = format!("x = {}1\n", "-".repeat(1024));
     match extract_all_static_dags(&src) {
         Ok(_) => {}
         Err(ParseError::Parse(msg)) => assert!(
-            !msg.contains("unary-prefix operator chain"),
-            "run-64 must not trip the unary cap: {msg}"
+            !msg.contains("recursion depth"),
+            "run-1024 must not trip the recursion cap: {msg}"
         ),
         Err(other) => panic!("unexpected error: {other:?}"),
     }
 }
 
 #[test]
-fn unary_op_run_far_over_cap_rejected() {
-    // Run of 300 `~`. Kills both `> -> ==` (fires only at exactly 65)
-    // and `> -> >=`; the real operator rejects everything above 64.
-    let src = format!("{}x\n", "~".repeat(300));
-    let err = extract_all_static_dags(&src).expect_err("run 300 must be rejected");
+fn recursion_run_far_over_cap_rejected() {
+    // Run of 2000 `~` (>> 1024). The lexer-pass recursion cap rejects it
+    // even though no bracket is present — the vector a bracket-only cap
+    // would miss entirely.
+    let src = format!("{}x\n", "~".repeat(2000));
+    let err = extract_all_static_dags(&src).expect_err("run 2000 must be rejected");
     match err {
         ParseError::Parse(msg) => assert!(
-            msg.contains("unary-prefix operator chain"),
-            "expected unary-cap message: {msg}"
+            msg.contains("recursion depth"),
+            "expected recursion-cap message: {msg}"
+        ),
+        other => panic!("expected Parse, got {other:?}"),
+    }
+}
+
+#[test]
+fn keyword_not_chain_rejected_by_recursion_cap() {
+    // `not not not …` recurses one frame per `not` with NO bracket and NO
+    // single-byte operator — the exact shape the old bracket+byte caps
+    // missed. The lexer pass must reject it as a graceful skip-file error.
+    let src = format!("x = {}True\n", "not ".repeat(3000));
+    let err = extract_all_static_dags(&src).expect_err("not-chain must be rejected");
+    match err {
+        ParseError::Parse(msg) => assert!(
+            msg.contains("recursion depth"),
+            "expected recursion-cap message: {msg}"
         ),
         other => panic!("expected Parse, got {other:?}"),
     }
@@ -399,7 +423,10 @@ with contextlib.suppress(Exception):
     pass
 ";
     let dags = extract_all_static_dags(src).expect("parse");
-    assert!(dags.is_empty(), "non-DAG context manager produced DAGs: {dags:?}");
+    assert!(
+        dags.is_empty(),
+        "non-DAG context manager produced DAGs: {dags:?}"
+    );
 }
 
 #[test]
@@ -432,7 +459,10 @@ def helper():
     pass
 ";
     let dags = extract_all_static_dags(src).expect("parse");
-    assert!(dags.is_empty(), "non-dag decorator produced a DAG: {dags:?}");
+    assert!(
+        dags.is_empty(),
+        "non-dag decorator produced a DAG: {dags:?}"
+    );
 }
 
 #[test]
@@ -566,7 +596,9 @@ with DAG(dag_id="cs"):
 "#;
     let markers = dynamic_markers_for(src);
     assert!(
-        markers.iter().any(|m| matches!(m, DynamicMarker::ChainSplat { .. })),
+        markers
+            .iter()
+            .any(|m| matches!(m, DynamicMarker::ChainSplat { .. })),
         "chain splat inside a DAG must be flagged: {markers:?}"
     );
 }
@@ -584,7 +616,9 @@ chain(*items)
 ";
     let markers = dynamic_markers_for(src);
     assert!(
-        !markers.iter().any(|m| matches!(m, DynamicMarker::ChainSplat { .. })),
+        !markers
+            .iter()
+            .any(|m| matches!(m, DynamicMarker::ChainSplat { .. })),
         "chain splat at module scope must NOT be flagged: {markers:?}"
     );
 }
@@ -602,7 +636,9 @@ with DAG(dag_id="cs2"):
 "#;
     let markers = dynamic_markers_for(src);
     assert!(
-        markers.iter().any(|m| matches!(m, DynamicMarker::ChainSplat { .. })),
+        markers
+            .iter()
+            .any(|m| matches!(m, DynamicMarker::ChainSplat { .. })),
         "attribute chain helper must be flagged: {markers:?}"
     );
 }
@@ -622,7 +658,9 @@ with DAG(dag_id="loopgen"):
 "#;
     let markers = dynamic_markers_for(src);
     assert!(
-        markers.iter().any(|m| matches!(m, DynamicMarker::ForLoopTaskGeneration { .. })),
+        markers
+            .iter()
+            .any(|m| matches!(m, DynamicMarker::ForLoopTaskGeneration { .. })),
         "operator constructed in a for-loop must be flagged: {markers:?}"
     );
 }
@@ -640,7 +678,9 @@ with DAG(dag_id="loopgen2"):
 "#;
     let markers = dynamic_markers_for(src);
     assert!(
-        !markers.iter().any(|m| matches!(m, DynamicMarker::ForLoopTaskGeneration { .. })),
+        !markers
+            .iter()
+            .any(|m| matches!(m, DynamicMarker::ForLoopTaskGeneration { .. })),
         "non-operator loop call must NOT flag: {markers:?}"
     );
 }
@@ -660,7 +700,9 @@ if os.environ.get("ENABLE"):
 "#;
     let markers = dynamic_markers_for(src);
     assert!(
-        markers.iter().any(|m| matches!(m, DynamicMarker::ImportTimeBranching { .. })),
+        markers
+            .iter()
+            .any(|m| matches!(m, DynamicMarker::ImportTimeBranching { .. })),
         "DAG under non-constant if must flag: {markers:?}"
     );
 }
@@ -678,7 +720,9 @@ if True:
 "#;
     let markers = dynamic_markers_for(src);
     assert!(
-        !markers.iter().any(|m| matches!(m, DynamicMarker::ImportTimeBranching { .. })),
+        !markers
+            .iter()
+            .any(|m| matches!(m, DynamicMarker::ImportTimeBranching { .. })),
         "DAG under constant `if True` must NOT flag branching: {markers:?}"
     );
 }
@@ -728,12 +772,16 @@ def q():
 "#;
     let dyn_markers = dynamic_markers_for(dynamic);
     assert!(
-        dyn_markers.iter().any(|m| matches!(m, DynamicMarker::UnsupportedTaskFlow { .. })),
+        dyn_markers
+            .iter()
+            .any(|m| matches!(m, DynamicMarker::UnsupportedTaskFlow { .. })),
         "@task(expand=True) must flag: {dyn_markers:?}"
     );
     let bare_markers = dynamic_markers_for(bare);
     assert!(
-        !bare_markers.iter().any(|m| matches!(m, DynamicMarker::UnsupportedTaskFlow { .. })),
+        !bare_markers
+            .iter()
+            .any(|m| matches!(m, DynamicMarker::UnsupportedTaskFlow { .. })),
         "bare @task must NOT flag UnsupportedTaskFlow: {bare_markers:?}"
     );
 }
@@ -756,7 +804,9 @@ def p():
 "#;
     let markers = dynamic_markers_for(src);
     assert!(
-        markers.iter().any(|m| matches!(m, DynamicMarker::UnsupportedTaskFlow { .. })),
+        markers
+            .iter()
+            .any(|m| matches!(m, DynamicMarker::UnsupportedTaskFlow { .. })),
         "@task('positional') must flag UnsupportedTaskFlow: {markers:?}"
     );
 }
@@ -815,7 +865,9 @@ with DAG(dag_id="asg"):
 "#;
     let markers = dynamic_markers_for(src);
     assert!(
-        markers.iter().any(|m| matches!(m, DynamicMarker::ChainSplat { .. })),
+        markers
+            .iter()
+            .any(|m| matches!(m, DynamicMarker::ChainSplat { .. })),
         "chain splat on the RHS of an assignment must flag: {markers:?}"
     );
 }
@@ -835,7 +887,9 @@ with DAG(dag_id='ann_asg'):
 ";
     let markers = dynamic_markers_for(src);
     assert!(
-        markers.iter().any(|m| matches!(m, DynamicMarker::ChainSplat { .. })),
+        markers
+            .iter()
+            .any(|m| matches!(m, DynamicMarker::ChainSplat { .. })),
         "chain splat on the RHS of an annotated assignment must flag: {markers:?}"
     );
 }
@@ -882,7 +936,9 @@ chain(*items)
 "#;
     let markers = dynamic_markers_for(src);
     assert!(
-        !markers.iter().any(|m| matches!(m, DynamicMarker::ChainSplat { .. })),
+        !markers
+            .iter()
+            .any(|m| matches!(m, DynamicMarker::ChainSplat { .. })),
         "chain splat after the DAG block must NOT flag (context leaked): {markers:?}"
     );
 }
@@ -904,7 +960,9 @@ chain(*items)
 "#;
     let markers = dynamic_markers_for(src);
     assert!(
-        !markers.iter().any(|m| matches!(m, DynamicMarker::ChainSplat { .. })),
+        !markers
+            .iter()
+            .any(|m| matches!(m, DynamicMarker::ChainSplat { .. })),
         "chain splat after the @dag function must NOT flag: {markers:?}"
     );
 }
@@ -960,7 +1018,10 @@ from airflow.models.baseoperator import chain
 with DAG(dag_id="ctx"):
     chain(*items)
 "#;
-    assert!(has_chain_splat(bare_dag), "bare DAG `with` must flag the splat");
+    assert!(
+        has_chain_splat(bare_dag),
+        "bare DAG `with` must flag the splat"
+    );
 }
 
 #[test]
@@ -1013,7 +1074,10 @@ from airflow.models.baseoperator import chain
 def pipe():
     chain(*items)
 "#;
-    assert!(has_chain_splat(dag_deco), "@dag decorator must open the context");
+    assert!(
+        has_chain_splat(dag_deco),
+        "@dag decorator must open the context"
+    );
 }
 
 #[test]
@@ -1249,7 +1313,11 @@ def bare_pipeline():
     pass
 ";
     let dags = extract_all_static_dags(src).expect("parse");
-    assert_eq!(dags.len(), 1, "bare @dag must register exactly one DAG: {dags:?}");
+    assert_eq!(
+        dags.len(),
+        1,
+        "bare @dag must register exactly one DAG: {dags:?}"
+    );
     assert_eq!(dag_id_of(&dags[0]), Some("bare_pipeline"));
 }
 
@@ -1271,7 +1339,10 @@ def not_a_dag():
     pass
 ";
     let dags = extract_all_static_dags(src).expect("parse");
-    assert!(dags.is_empty(), "non-dag Name-call decorator produced a DAG: {dags:?}");
+    assert!(
+        dags.is_empty(),
+        "non-dag Name-call decorator produced a DAG: {dags:?}"
+    );
 }
 
 #[test]
@@ -1290,7 +1361,10 @@ def celery_task():
     pass
 ";
     let dags = extract_all_static_dags(src).expect("parse");
-    assert!(dags.is_empty(), "non-dag attribute-call decorator produced a DAG: {dags:?}");
+    assert!(
+        dags.is_empty(),
+        "non-dag attribute-call decorator produced a DAG: {dags:?}"
+    );
 }
 
 #[test]
