@@ -13,12 +13,15 @@ reached their first semver-stable release (`v1.0.0`) on 2026-06-08 —
 clippy pedantic + nursery clean under `-D warnings`, `unsafe_code =
 forbid`, `cargo audit` / `cargo deny` clean, ≥95% mutation kill rate,
 ≥85% line coverage, and a 6-round adversarial design-review pass.
+`ferro-airflow-dag-parser` subsequently shipped a semver-compatible
+security patch (`v1.0.1`, 2026-06-16) closing a parser stack-overflow
+DoS; the other five remain at `v1.0.0`.
 
 | Crate | Source product | Current version | Stability |
 |---|---|---|---|
 | [`ferro-blob-store`](../crates/ferro-blob-store/) | FerroRepo storage | `v1.0.0` | stable — foundation content-addressed blob store (in-memory + filesystem) |
 | [`ferro-lumberjack`](../crates/ferro-lumberjack/) | FerroBeat / FerroHeartbeat | `v1.0.0` | stable — Lumberjack/Beats v2 codec + client + server, TLS both directions; per-window memory cap |
-| [`ferro-airflow-dag-parser`](../crates/ferro-airflow-dag-parser/) | `ferro-air` | `v1.0.0` | stable — static AST DAG extraction (ruff backend), panic-shielded |
+| [`ferro-airflow-dag-parser`](../crates/ferro-airflow-dag-parser/) | `ferro-air` | `v1.0.1` | stable — static AST DAG extraction (ruff backend), panic-shielded + recursion-DoS hardened |
 | [`ferro-maven-layout`](../crates/ferro-maven-layout/) | FerroRepo Maven | `v1.0.0` | stable — Maven layout 2.0 + POM/metadata parsing (panic-shielded); PUT body limit + TOCTOU fix |
 | [`ferro-cargo-registry-server`](../crates/ferro-cargo-registry-server/) | FerroRepo Cargo | `v1.0.0` | stable — Cargo Alternative Registry (RFC 2789) server + binary + `/metrics` + K8s probes + durable index; real-`cargo` verified |
 | [`ferro-oci-server`](../crates/ferro-oci-server/) | FerroRepo OCI | `v1.0.0` | stable — OCI Distribution v1.1 server + binary + `/metrics` + K8s probes + durable metadata. **Official conformance suite: 75/75 specs pass** (harness in `crates/ferro-oci-server/tests/conformance/`) |
@@ -64,11 +67,15 @@ rather than fork.
 | Beta | `v0.1.x`–`v0.x.x` | Allowed at minor bumps; deprecation cycle starts | 6-12 months |
 | Stable | `v1.x.x` | Strict semver | indefinite |
 
-All six Tier 1 crates reached **Stable (`v1.x`)** on 2026-06-08. From
-`v1.0.0` onward each crate's public API is a strict semver contract:
+All six Tier 1 crates reached **Stable (`v1.x`)** on 2026-06-08
+(`ferro-airflow-dag-parser` is now at `v1.0.1`). Each crate is versioned
+and released independently — there is no single workspace version number,
+and the workspace-level `[workspace.package].version` is a non-inherited
+baseline default (every member crate pins its own `version`). From each
+crate's `v1.0.0` onward its public API is a strict semver contract:
 breaking changes (renames, removals, or signature changes that aren't
-strict additions) require a major bump; minor releases may add items and
-`#[deprecate]` existing ones, but will not remove them.
+strict additions) require a major bump; patch/minor releases may add
+items and `#[deprecate]` existing ones, but will not remove them.
 
 ## What "ready to publish" means here
 
@@ -82,11 +89,11 @@ Before a crate is published to crates.io, it must:
    Windows.
 3. Have at least one fuzz target if it parses untrusted input, with a
    nightly CI job exercising the corpus.
-3. Have at least one criterion benchmark if it sits on a hot path.
-4. Have a `README.md` that cites the relevant specification and
+4. Have at least one criterion benchmark if it sits on a hot path.
+5. Have a `README.md` that cites the relevant specification and
    declares the API stability stage.
-5. Have a working `examples/` directory.
-6. Reach 80%+ line coverage as measured by `cargo llvm-cov`, or
+6. Have a working `examples/` directory.
+7. Reach 80%+ line coverage as measured by `cargo llvm-cov`, or
    document why a higher floor is unrealistic.
 
 The `release.yml` workflow refuses to publish a crate that has not

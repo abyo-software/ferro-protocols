@@ -4,8 +4,14 @@ resolver = "2"
 members = ["crates/*"]
 exclude = ["crates/*/fuzz"]
 
+# Note: every member crate pins its own `version` (it does NOT use
+# `version.workspace = true`), so this workspace-level default is not
+# inherited by any crate. It is set to the baseline GA line (matching the
+# `v1.0.0` git tag) purely so the workspace metadata is not self-contradictory;
+# the authoritative per-crate versions live in each `crates/*/Cargo.toml`
+# (currently five crates at `1.0.0`, `ferro-airflow-dag-parser` at `1.0.1`).
 [workspace.package]
-version = "0.0.0"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.88"
 license = "Apache-2.0"

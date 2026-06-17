@@ -22,12 +22,13 @@ running the source.
 > leaves hanging: *what if the structural read didn't need
 > CPython at all?*
 
-> 🟢 **Stable (`v1.0.0`).** The public API is committed under strict
-> semver: breaking changes require a major bump. The implementation
-> is pulled from production use in the Ferro ecosystem; it is the
-> static fast-path that orchestrators use to skip `CPython`
-> evaluation when a DAG file's structure can be determined by
-> looking at the Python AST alone.
+> 🟢 **Stable (`v1.x`, current `v1.0.1`).** The public API is committed
+> under strict semver: breaking changes require a major bump. (`v1.0.1`
+> is a semver-compatible security patch over `v1.0.0` — recursion-DoS
+> hardening, no API change.) The implementation is pulled from
+> production use in the Ferro ecosystem; it is the static fast-path that
+> orchestrators use to skip `CPython` evaluation when a DAG file's
+> structure can be determined by looking at the Python AST alone.
 
 Part of the **Ferro ecosystem**. Extracted from production use in
 [FerroAir](https://github.com/abyo-software/ferro-air) (an Airflow-3-compatible orchestrator written in Rust).

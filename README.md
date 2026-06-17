@@ -26,6 +26,21 @@ cargo add ferro-oci-server              # OCI Distribution v1.1 server primitive
 
 ## What's new
 
+### 2026-06-16 — `ferro-airflow-dag-parser` `v1.0.1` (security patch)
+
+A semver-compatible security patch (no public-API change). Parsing
+attacker-controlled Python DAG source could overflow the vendored
+recursive-descent parser and abort the host process with a `SIGSEGV`
+(a guard-page fault that `catch_unwind` cannot intercept). `v1.0.1`
+ports a three-layer recursion guard — an iterative bracket pre-scan, a
+single real-tokenizer pass that bounds combined expression recursion,
+and execution of the parse **and** AST walk on a dedicated 128 MiB stack
+— plus a depth cap on the recursive AST walkers. The realistic
+parser-recursion shapes are fully closed; one honest residual (a
+multi-MB single left-leaning trailer chain bounded by the 128 MiB stack)
+is documented in [`dd-pack/11-known-limitations.md`](dd-pack/11-known-limitations.md).
+The other five crates remain at `v1.0.0`.
+
 ### 2026-06-08 — All six crates reach `v1.0.0` (stable, semver-committed)
 
 The workspace shipped its first semver-stable GA. Every crate is now
@@ -38,7 +53,7 @@ adversarial design-review (0 P0/P1).
 |---|---|---|
 | [`ferro-blob-store`](https://crates.io/crates/ferro-blob-store) | `v1.0.0` stable | API stabilized; mutation/DD-hardened foundation blob store |
 | [`ferro-lumberjack`](https://crates.io/crates/ferro-lumberjack) | `v1.0.0` stable | API stabilized; configurable per-window memory cap closes an unbounded-accumulation DoS |
-| [`ferro-airflow-dag-parser`](https://crates.io/crates/ferro-airflow-dag-parser) | `v1.0.0` stable | API stabilized; panic-shielded static AST extractor |
+| [`ferro-airflow-dag-parser`](https://crates.io/crates/ferro-airflow-dag-parser) | `v1.0.0` stable (now `v1.0.1`) | API stabilized; panic-shielded static AST extractor (recursion-DoS hardening landed in `v1.0.1`, see above) |
 | [`ferro-maven-layout`](https://crates.io/crates/ferro-maven-layout) | `v1.0.0` stable | API stabilized; explicit PUT body limit + delete TOCTOU fix |
 | [`ferro-cargo-registry-server`](https://crates.io/crates/ferro-cargo-registry-server) | `v1.0.0` stable | runnable binary + `/metrics` + K8s probes + durable filesystem index; real-`cargo` verified |
 | [`ferro-oci-server`](https://crates.io/crates/ferro-oci-server) | `v1.0.0` stable | runnable binary + `/metrics` + K8s probes + durable metadata; **official OCI conformance suite 75/75** |
@@ -113,11 +128,14 @@ terms as the rest of the Rust ecosystem (Apache-2.0).
 
 ## Status
 
-> 🟢 **All six crates are stable at `v1.0.0` (semver-committed).**
-> From `v1.0.0` onward each crate's public API is a strict semver
-> contract: breaking changes require a major bump; minor releases are
-> additive (and may `#[deprecate]`, but not remove). See each crate's
-> `README.md` for its current status and roadmap.
+> 🟢 **All six crates are stable at `v1.0.0`+ (semver-committed).**
+> Five are at `v1.0.0`; `ferro-airflow-dag-parser` is at `v1.0.1` (a
+> security patch). Each crate is versioned and released independently —
+> there is no single workspace version number. From each crate's
+> `v1.0.0` onward its public API is a strict semver contract: breaking
+> changes require a major bump; minor releases are additive (and may
+> `#[deprecate]`, but not remove). See each crate's `README.md` for its
+> current status and roadmap.
 
 The six crates split into **four libraries** (data types, codecs, and
 traits you embed) and **two server-primitive crates** (HTTP request
@@ -129,7 +147,7 @@ handlers you mount behind your own Axum/Tower stack):
 |---|---|---|---|---|
 | [`ferro-blob-store`](crates/ferro-blob-store/README.md) [![crates.io](https://img.shields.io/crates/v/ferro-blob-store.svg)](https://crates.io/crates/ferro-blob-store) | [![docs.rs](https://img.shields.io/docsrs/ferro-blob-store)](https://docs.rs/ferro-blob-store) | `v1.0.0` | FerroRepo storage | stable — content-addressed `BlobStore` trait + in-memory + filesystem backends; foundation for OCI / Maven / Cargo crates below |
 | [`ferro-lumberjack`](crates/ferro-lumberjack/README.md) [![crates.io](https://img.shields.io/crates/v/ferro-lumberjack.svg)](https://crates.io/crates/ferro-lumberjack) | [![docs.rs](https://img.shields.io/docsrs/ferro-lumberjack)](https://docs.rs/ferro-lumberjack) | `v1.0.0` | `ferro-beat` / `ferro-heartbeat` | stable — Logstash Lumberjack v2 codec + client + server + TLS |
-| [`ferro-airflow-dag-parser`](crates/ferro-airflow-dag-parser/README.md) [![crates.io](https://img.shields.io/crates/v/ferro-airflow-dag-parser.svg)](https://crates.io/crates/ferro-airflow-dag-parser) | [![docs.rs](https://img.shields.io/docsrs/ferro-airflow-dag-parser)](https://docs.rs/ferro-airflow-dag-parser) | `v1.0.0` | `ferro-air` | stable — static AST DAG extraction (ruff backend, 7 dynamic-fallback markers) |
+| [`ferro-airflow-dag-parser`](crates/ferro-airflow-dag-parser/README.md) [![crates.io](https://img.shields.io/crates/v/ferro-airflow-dag-parser.svg)](https://crates.io/crates/ferro-airflow-dag-parser) | [![docs.rs](https://img.shields.io/docsrs/ferro-airflow-dag-parser)](https://docs.rs/ferro-airflow-dag-parser) | `v1.0.1` | `ferro-air` | stable — static AST DAG extraction (ruff backend, 7 dynamic-fallback markers); recursion-DoS hardened |
 | [`ferro-maven-layout`](crates/ferro-maven-layout/README.md) [![crates.io](https://img.shields.io/crates/v/ferro-maven-layout.svg)](https://crates.io/crates/ferro-maven-layout) | [![docs.rs](https://img.shields.io/docsrs/ferro-maven-layout)](https://docs.rs/ferro-maven-layout) | `v1.0.0` | FerroRepo Maven | stable — Maven Repository Layout 2.0 + Axum router (`http` feature) |
 
 **Server primitives**
@@ -177,6 +195,15 @@ cargo fmt --all -- --check
 cargo test --workspace
 cargo deny check
 ```
+
+As of 2026-06-18, `cargo test --workspace` runs **735 tests** (unit +
+integration + doctests) with 0 failures. The MSRV is Rust **1.88**
+(declared via `rust-version`); the pinned development toolchain in
+`rust-toolchain.toml` is **1.91.1**. The OCI server additionally has an
+out-of-band conformance harness (`crates/ferro-oci-server/tests/conformance/`)
+that drives the official `opencontainers/distribution-spec` v1.1 suite
+against the running binary — latest recorded run **75 passed / 0 failed /
+5 skipped** (see [`RESULTS.md`](crates/ferro-oci-server/tests/conformance/RESULTS.md)).
 
 ## Contributing
 
